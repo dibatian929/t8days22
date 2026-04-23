@@ -623,39 +623,39 @@ const AboutPage = ({ profile, lang, onClose }) => {
   );
 };
 
-// ImmersiveLightbox: 支持沉浸模式切换（暗/亮）+ 双击/捏合缩放 + 拖动查看细节
+// ImmersiveLightbox: 沉浸模式切换 + 竖图 3:4 裁切 + 手机端双指缩放
 const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang }) => {
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
   const [imgKey, setImgKey] = useState(0);
 
-  // 沉浸模式：'normal' -> 'immersive-dark' -> 'immersive-light' -> 'normal'
-  const [viewMode, setViewMode] = useState('normal');
+  // 沉浸模式：false = 正常（黑背景 + 所有UI），true = 白色沉浸（隐藏UI + 白背景）
+  const [immersive, setImmersive] = useState(false);
 
-  // 缩放与平移状态
+  // 图片原始尺寸（判断横/竖图）
+  const [imgDims, setImgDims] = useState({ w: 0, h: 0 });
+
+  // 双指缩放状态（仅手机端）
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
-  // 是否正在手势操作中（捏合/拖动），决定是否启用过渡动画
   const [isGesturing, setIsGesturing] = useState(false);
 
-  const containerRef = useRef(null);
-
-  // 手势内部引用（不触发重渲染）
+  // 手势内部引用
   const gestureRef = useRef({
+    // 单指滑动
     swipeStartX: null,
+    swipeStartY: null,
     swipeEndX: null,
-    pinchStartDistance: null,
-    pinchStartZoom: 1,
-    panStart: null,
-    panStartOffset: { x: 0, y: 0 },
-    lastTapTime: 0,
-    lastTapX: 0,
-    lastTapY: 0,
     touchMoved: false,
     touchStartTime: 0,
-    // 防止 onClick 和 onTouchEnd 双触发
-    lastTouchEndAt: 0,
-    // PC 端单击延迟计时器（用来和双击区分）
-    pcClickTimer: null,
+    // 双指捏合
+    pinchStartDistance: null,
+    pinchStartZoom: 1,
+    isPinching: false,
+    // 拖动（放大后）
+    panStart: null,
+    panStartOffset: { x: 0, y: 0 },
+    // 单击延迟计时器（和可能的拖动区分）
+    tapTimer: null,
   });
 
   const currentImage = images[currentIndex];
@@ -684,86 +684,93 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
     setCurrentIndex(nextIndex);
     setImgKey(k => k + 1);
     resetZoom();
+    setImgDims({ w: 0, h: 0 });
     if (onIndexChange) onIndexChange(nextIndex);
   };
 
-  // 循环切换沉浸模式
-  const cycleViewMode = () => {
-    setViewMode(prev => {
-      if (prev === 'normal') return 'immersive-dark';
-      if (prev === 'immersive-dark') return 'immersive-light';
-      return 'normal';
-    });
+  // 切换沉浸模式
+  const toggleImmersive = () => {
+    setImmersive(prev => !prev);
   };
 
-  // 触摸：开始
+  // ---------- 触摸事件 ----------
   const onTouchStart = (e) => {
     const g = gestureRef.current;
     g.touchMoved = false;
     g.touchStartTime = Date.now();
 
     if (e.touches.length === 2) {
+      // 双指：开始捏合
       const dx = e.touches[0].clientX - e.touches[1].clientX;
       const dy = e.touches[0].clientY - e.touches[1].clientY;
       g.pinchStartDistance = Math.sqrt(dx * dx + dy * dy);
       g.pinchStartZoom = zoom;
+      g.isPinching = true;
       setIsGesturing(true);
+      // 清除可能的点击计时器
+      if (g.tapTimer) { clearTimeout(g.tapTimer); g.tapTimer = null; }
     } else if (e.touches.length === 1) {
       const t = e.touches[0];
       if (zoom > 1) {
+        // 缩放状态 → 开始拖动
         g.panStart = { x: t.clientX, y: t.clientY };
         g.panStartOffset = { ...pan };
         setIsGesturing(true);
       } else {
+        // 正常状态 → 记录滑动起点
         g.swipeStartX = t.clientX;
+        g.swipeStartY = t.clientY;
         g.swipeEndX = null;
       }
     }
   };
 
-  // 触摸：移动
   const onTouchMove = (e) => {
     const g = gestureRef.current;
-    g.touchMoved = true;
 
     if (e.touches.length === 2 && g.pinchStartDistance != null) {
+      // 双指捏合
+      g.touchMoved = true;
       const dx = e.touches[0].clientX - e.touches[1].clientX;
       const dy = e.touches[0].clientY - e.touches[1].clientY;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      const newZoom = Math.max(1, Math.min(5, g.pinchStartZoom * (dist / g.pinchStartDistance)));
+      const newZoom = Math.max(1, Math.min(4, g.pinchStartZoom * (dist / g.pinchStartDistance)));
       setZoom(newZoom);
       if (newZoom === 1) setPan({ x: 0, y: 0 });
     } else if (e.touches.length === 1) {
       const t = e.touches[0];
       if (zoom > 1 && g.panStart) {
+        // 拖动（放大状态）
+        g.touchMoved = true;
         setPan({
           x: g.panStartOffset.x + (t.clientX - g.panStart.x),
           y: g.panStartOffset.y + (t.clientY - g.panStart.y),
         });
-      } else if (zoom === 1) {
+      } else if (zoom === 1 && g.swipeStartX != null) {
+        // 滑动（正常状态）
+        const dx = Math.abs(t.clientX - g.swipeStartX);
+        const dy = Math.abs(t.clientY - g.swipeStartY);
+        if (dx > 10 || dy > 10) g.touchMoved = true;
         g.swipeEndX = t.clientX;
       }
     }
   };
 
-  // 触摸：结束
   const onTouchEnd = (e) => {
     const g = gestureRef.current;
     const now = Date.now();
     const touchDuration = now - g.touchStartTime;
 
-    // 记录触摸结束时间（用于 onClick 去重）
-    g.lastTouchEndAt = now;
-
     // 双指结束
-    if (g.pinchStartDistance != null) {
+    if (g.isPinching) {
+      g.isPinching = false;
       g.pinchStartDistance = null;
       setIsGesturing(false);
       return;
     }
 
-    // 缩放状态下结束拖动
-    if (zoom > 1) {
+    // 缩放状态下拖动结束
+    if (zoom > 1 && g.panStart) {
       g.panStart = null;
       setIsGesturing(false);
       return;
@@ -776,40 +783,24 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
         if (distance > 0) changeImage("next");
         else changeImage("prev");
         g.swipeStartX = null;
+        g.swipeStartY = null;
         g.swipeEndX = null;
         return;
       }
     }
 
-    // 未移动 + 时间短 → 视作点击
-    if (!g.touchMoved && touchDuration < 300 && e.changedTouches && e.changedTouches.length > 0) {
-      const touch = e.changedTouches[0];
-      const x = touch.clientX;
-      const y = touch.clientY;
-      const timeDiff = now - g.lastTapTime;
-      const distDiff = Math.sqrt((x - g.lastTapX) ** 2 + (y - g.lastTapY) ** 2);
-
-      if (timeDiff < 400 && distDiff < 50) {
-        // 双击 → 缩放切换
-        if (zoom === 1) setZoom(2.5);
-        else resetZoom();
-        g.lastTapTime = 0; // 重置以防三连击
-      } else {
-        // 单击 → 记录时间，延迟后判定是否为单击（如果 400ms 内没有第二击）
-        g.lastTapTime = now;
-        g.lastTapX = x;
-        g.lastTapY = y;
-        setTimeout(() => {
-          // 如果这段时间没有第二击（lastTapTime 没被重置且未变），才触发沉浸切换
-          if (gestureRef.current.lastTapTime === now) {
-            cycleViewMode();
-            gestureRef.current.lastTapTime = 0;
-          }
-        }, 400);
-      }
+    // 未移动 + 短时间 → 视作单击
+    if (!g.touchMoved && touchDuration < 300) {
+      // 延迟 50ms 触发（确保不是双指的瞬间残留）
+      if (g.tapTimer) clearTimeout(g.tapTimer);
+      g.tapTimer = setTimeout(() => {
+        toggleImmersive();
+        g.tapTimer = null;
+      }, 50);
     }
 
     g.swipeStartX = null;
+    g.swipeStartY = null;
     g.swipeEndX = null;
   };
 
@@ -819,84 +810,39 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
       if (e.key === "ArrowRight") changeImage("next");
       if (e.key === "ArrowLeft") changeImage("prev");
       if (e.key === "Escape") {
-        if (viewMode !== 'normal') {
-          setViewMode('normal');
-        } else {
-          onClose();
-        }
+        if (immersive) setImmersive(false);
+        else onClose();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [currentIndex, images, onClose, viewMode]);
+  }, [currentIndex, images, onClose, immersive]);
 
-  // PC 端：原生 wheel 事件（React 的 onWheel 在现代浏览器里是 passive，不能 preventDefault）
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const handleWheel = (e) => {
-      if (!e.ctrlKey && !e.metaKey) return; // 只有按住 Ctrl/Cmd 才缩放
-      e.preventDefault();
-      const delta = -e.deltaY * 0.005;
-      setZoom(prev => {
-        const next = Math.max(1, Math.min(5, prev + delta));
-        if (next === 1) setPan({ x: 0, y: 0 });
-        return next;
-      });
-    };
-    el.addEventListener('wheel', handleWheel, { passive: false });
-    return () => el.removeEventListener('wheel', handleWheel);
-  }, []);
-
-  // PC 端双击图片放大
-  const onImageDoubleClick = (e) => {
-    e.stopPropagation();
-    // 清除延迟的单击处理
-    if (gestureRef.current.pcClickTimer) {
-      clearTimeout(gestureRef.current.pcClickTimer);
-      gestureRef.current.pcClickTimer = null;
-    }
-    if (zoom === 1) setZoom(2.5);
-    else resetZoom();
-  };
-
-  // PC 端：点击容器切换沉浸模式（带双击区分 + 去重防 touchEnd 触发）
+  // PC 端：点击容器空白切换沉浸模式
   const onContainerClick = (e) => {
+    // 只处理直接点击容器本身（图片的 pointer-events 已隔离）
     if (e.target !== e.currentTarget) return;
-    const g = gestureRef.current;
-    // 去重：刚刚 touchEnd 触发过，忽略紧随其后的 click（手机浏览器合成事件）
-    if (Date.now() - g.lastTouchEndAt < 500) return;
-
-    // 延迟 250ms 判定是否为双击
-    if (g.pcClickTimer) {
-      clearTimeout(g.pcClickTimer);
-      g.pcClickTimer = null;
-      return;
-    }
-    g.pcClickTimer = setTimeout(() => {
-      cycleViewMode();
-      g.pcClickTimer = null;
-    }, 250);
+    // 手机端由 onTouchEnd 处理，onClick 是合成事件不在这里处理
+    if ('ontouchstart' in window) return;
+    toggleImmersive();
   };
 
   const preventPropagation = (e) => e.stopPropagation();
 
   if (!currentImage) return null;
 
-  // 手机端图片两边拉满，PC端居中带留白
-  const imgClassName = "w-screen max-h-[85vh] md:w-auto md:max-w-[92vw] md:max-h-[85vh]";
   const displayTitle = currentImage.projectTitles?.[lang] || currentImage.project;
 
-  // 根据 viewMode 调整背景色
-  const isLight = viewMode === 'immersive-light';
-  const isImmersive = viewMode !== 'normal';
-  const bgColor = isLight ? '#ffffff' : '#000000';
-  const textColor = isLight ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.4)';
-  const iconColor = isLight ? 'text-neutral-700 hover:text-black' : 'text-neutral-500 hover:text-white';
+  // 判断横/竖图（只有在尺寸加载后才能确定）
+  const isPortrait = imgDims.h > 0 && imgDims.h > imgDims.w;
+
+  // 配色
+  const bgColor = immersive ? '#ffffff' : '#000000';
+  const textColor = immersive ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.4)';
+  const iconColor = immersive ? 'text-neutral-700 hover:text-black' : 'text-neutral-500 hover:text-white';
 
   return (
     <div
-      ref={containerRef}
       className="fixed inset-0 z-[100] flex items-center justify-center animate-fade-in"
       onTouchStart={onTouchStart}
       onTouchMove={onTouchMove}
@@ -912,46 +858,94 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
         onClick={(e) => { e.stopPropagation(); onClose(); }}
         onPointerDown={preventPropagation}
         className={`absolute top-6 right-6 z-[110] ${iconColor} transition-all duration-500 p-4`}
-        style={{ opacity: isImmersive ? 0 : 1, pointerEvents: isImmersive ? 'none' : 'auto' }}
+        style={{ opacity: immersive ? 0 : 1, pointerEvents: immersive ? 'none' : 'auto' }}
       >
         <X className="w-6 h-6" />
       </button>
 
-      {/* PC 端箭头 */}
+      {/* PC 端侧边箭头 */}
       <div
         className="hidden md:flex absolute inset-y-0 left-4 z-20 items-center justify-center pointer-events-none transition-opacity duration-500"
-        style={{ opacity: isImmersive ? 0 : 1 }}
+        style={{ opacity: immersive ? 0 : 1 }}
       >
         <ChevronLeft className={`${iconColor} transition-colors`} size={48} strokeWidth={0.5} />
       </div>
       <div
         className="hidden md:flex absolute inset-y-0 right-4 z-20 items-center justify-center pointer-events-none transition-opacity duration-500"
-        style={{ opacity: isImmersive ? 0 : 1 }}
+        style={{ opacity: immersive ? 0 : 1 }}
       >
         <ChevronRight className={`${iconColor} transition-colors`} size={48} strokeWidth={0.5} />
       </div>
 
-      {/* PC端隐形点击翻页区域 - 仅在 normal & 未缩放时启用 */}
-      {!isImmersive && zoom === 1 && (
+      {/* PC端隐形点击翻页区域 - 仅非沉浸时启用 */}
+      {!immersive && (
         <>
           <div className="hidden md:block absolute top-24 bottom-24 left-0 w-1/3 z-10 cursor-pointer" onClick={(e) => { e.stopPropagation(); changeImage("prev"); }} />
           <div className="hidden md:block absolute top-24 bottom-24 right-0 w-1/3 z-10 cursor-pointer" onClick={(e) => { e.stopPropagation(); changeImage("next"); }} />
         </>
       )}
 
-      {/* 图片区域 */}
+      {/* 图片区域 - 分为手机端（竖图3:4裁切） vs 横图/PC端 */}
       <div className="relative z-0 w-full h-full flex items-center justify-center overflow-hidden pointer-events-none">
+        {/* 手机端竖图：强制 3:4 容器 + object-cover 裁切 */}
+        <div
+          className="md:hidden"
+          style={{
+            display: isPortrait ? 'block' : 'none',
+            width: '100vw',
+            aspectRatio: '3 / 4',
+            maxHeight: '90vh',
+            overflow: 'hidden',
+          }}
+        >
+          <img
+            key={`m-p-${imgKey}`}
+            src={currentImage.url}
+            alt="Photo"
+            onLoad={(e) => setImgDims({ w: e.target.naturalWidth, h: e.target.naturalHeight })}
+            className="lb-img-enter pointer-events-auto select-none"
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transition: isGesturing ? 'none' : 'transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+              willChange: 'transform',
+            }}
+            draggable={false}
+          />
+        </div>
+
+        {/* 手机端横图：两边拉满 + 原始比例 */}
         <img
-          key={imgKey}
+          key={`m-l-${imgKey}`}
           src={currentImage.url}
           alt="Photo"
-          onDoubleClick={onImageDoubleClick}
-          className={`${imgClassName} object-contain lb-img-enter pointer-events-auto select-none`}
+          onLoad={(e) => setImgDims({ w: e.target.naturalWidth, h: e.target.naturalHeight })}
+          className="md:hidden lb-img-enter pointer-events-auto select-none"
           style={{
+            display: isPortrait ? 'none' : 'block',
+            width: '100vw',
+            maxHeight: '90vh',
+            objectFit: 'contain',
             transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
             transition: isGesturing ? 'none' : 'transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
-            cursor: zoom > 1 ? 'grab' : 'zoom-in',
             willChange: 'transform',
+          }}
+          draggable={false}
+        />
+
+        {/* PC端：居中带留白，不裁切 */}
+        <img
+          key={`d-${imgKey}`}
+          src={currentImage.url}
+          alt="Photo"
+          onLoad={(e) => setImgDims({ w: e.target.naturalWidth, h: e.target.naturalHeight })}
+          className="hidden md:block lb-img-enter pointer-events-auto select-none"
+          style={{
+            maxWidth: '92vw',
+            maxHeight: '85vh',
+            objectFit: 'contain',
           }}
           draggable={false}
         />
@@ -960,7 +954,7 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
       {/* 底部信息栏 */}
       <div
         className="absolute bottom-8 left-8 right-8 z-30 pointer-events-none flex justify-between items-end transition-opacity duration-500"
-        style={{ opacity: isImmersive ? 0 : 1 }}
+        style={{ opacity: immersive ? 0 : 1 }}
       >
         <div style={{ color: textColor }} className="font-serif font-thin text-xs tracking-widest">
           {currentImage.year} — {displayTitle}
@@ -988,23 +982,6 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
           </div>
         </div>
       </div>
-
-      {/* 沉浸模式提示 */}
-      {isImmersive && (
-        <div
-          className="absolute top-6 left-1/2 -translate-x-1/2 z-[105] pointer-events-none"
-          style={{
-            color: isLight ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.35)',
-            fontSize: 10,
-            letterSpacing: '0.3em',
-            fontFamily: 'var(--font-body)',
-            textTransform: 'uppercase',
-            animation: 'fadeInUp 0.6s ease forwards',
-          }}
-        >
-          {isLight ? 'LIGHT' : 'DARK'} · TAP TO CONTINUE
-        </div>
-      )}
     </div>
   );
 };
