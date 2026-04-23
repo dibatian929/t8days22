@@ -751,6 +751,30 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
     };
   }, []);
 
+  // 锁定 body 滚动（防止 Lightbox 内滑动穿透到背后页面）
+  useEffect(() => {
+    const scrollY = window.scrollY;
+    const bodyStyle = document.body.style;
+    const prevOverflow = bodyStyle.overflow;
+    const prevPosition = bodyStyle.position;
+    const prevTop = bodyStyle.top;
+    const prevWidth = bodyStyle.width;
+
+    bodyStyle.overflow = 'hidden';
+    bodyStyle.position = 'fixed';
+    bodyStyle.top = `-${scrollY}px`;
+    bodyStyle.width = '100%';
+
+    return () => {
+      bodyStyle.overflow = prevOverflow;
+      bodyStyle.position = prevPosition;
+      bodyStyle.top = prevTop;
+      bodyStyle.width = prevWidth;
+      // 恢复到之前的滚动位置
+      window.scrollTo(0, scrollY);
+    };
+  }, []);
+
   // 点击容器空白切换背景
   const onContainerClick = (e) => {
     if (e.target !== e.currentTarget) return;
@@ -779,12 +803,24 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center animate-fade-in"
+      className="z-[100] flex items-center justify-center animate-fade-in"
       onTouchStart={onTouchStart}
       onTouchMove={onTouchMove}
       onTouchEnd={onTouchEnd}
       onClick={onContainerClick}
-      style={{ backgroundColor: bgColor, transition: 'background-color 0.4s ease' }}
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: '100vw',
+        height: '100vh',
+        backgroundColor: bgColor,
+        transition: 'background-color 0.4s ease',
+        touchAction: 'none', // 禁止原生触摸滚动，不影响长按菜单
+        overscrollBehavior: 'contain', // 防止下拉刷新等浏览器手势
+      }}
     >
       {/* 纯色背景兜底 */}
       <div className="absolute inset-0 pointer-events-none" style={{ zIndex: -1, backgroundColor: bgColor }} />
