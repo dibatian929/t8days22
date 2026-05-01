@@ -495,47 +495,70 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
     if (!isOpen) return null;
 
     // --- Block manipulation helpers (operate on currently active language tab) ---
+    // All mutations go through functional setStory so an in-flight async upload
+    // (which captures `story` at call time) cannot overwrite edits the user
+    // made on a different tab while the upload was running.
     const currentBlocks = story[activeStoryTab] || [];
 
-    const updateBlocks = (newBlocks) => {
-      setStory({ ...story, [activeStoryTab]: newBlocks });
-    };
-
     const addTextBlock = () => {
-      updateBlocks([...currentBlocks, { type: 'text', content: '' }]);
+      const lang = activeStoryTab;
+      setStory(prev => ({ ...prev, [lang]: [...(prev[lang] || []), { type: 'text', content: '' }] }));
     };
 
     const addImageBlock = () => {
-      updateBlocks([...currentBlocks, { type: 'image', url: '', caption: '' }]);
+      const lang = activeStoryTab;
+      setStory(prev => ({ ...prev, [lang]: [...(prev[lang] || []), { type: 'image', url: '', caption: '' }] }));
     };
 
     const updateBlock = (idx, patch) => {
-      const next = currentBlocks.map((b, i) => i === idx ? { ...b, ...patch } : b);
-      updateBlocks(next);
+      const lang = activeStoryTab;
+      setStory(prev => ({
+        ...prev,
+        [lang]: (prev[lang] || []).map((b, i) => i === idx ? { ...b, ...patch } : b)
+      }));
     };
 
     const deleteBlock = (idx) => {
       if (!confirm('Delete this block?')) return;
-      updateBlocks(currentBlocks.filter((_, i) => i !== idx));
+      const lang = activeStoryTab;
+      setStory(prev => ({
+        ...prev,
+        [lang]: (prev[lang] || []).filter((_, i) => i !== idx)
+      }));
     };
 
     const moveBlock = (idx, dir) => {
-      const newIdx = dir === 'up' ? idx - 1 : idx + 1;
-      if (newIdx < 0 || newIdx >= currentBlocks.length) return;
-      const next = [...currentBlocks];
-      [next[idx], next[newIdx]] = [next[newIdx], next[idx]];
-      updateBlocks(next);
+      const lang = activeStoryTab;
+      setStory(prev => {
+        const blocks = prev[lang] || [];
+        const newIdx = dir === 'up' ? idx - 1 : idx + 1;
+        if (newIdx < 0 || newIdx >= blocks.length) return prev;
+        const next = [...blocks];
+        [next[idx], next[newIdx]] = [next[newIdx], next[idx]];
+        return { ...prev, [lang]: next };
+      });
     };
 
     const handleImageUpload = async (idx, file) => {
       if (!file) return;
+      // Pin the language to the tab the user was on when they started the upload,
+      // so when the async resolves we patch the correct tab — even if they've
+      // switched tabs in the meantime.
+      const lang = activeStoryTab;
       setUploadingBlockIdx(idx);
       try {
         const optimized = await compressImage(file, 1920, 0.85);
         const safeProject = (formData.en || initialData?.oldProject || 'project').trim() || 'project';
-        const path = `${storagePathPrefix || 'photos'}/${safeProject}/story/${Date.now()}_${file.name}`;
+        // Story images live under `stories/` — a separate Storage root from
+        // `photos/` — so any external listener on `photos/` (e.g. a Cloud
+        // Function that mirrors uploads into the photos Firestore collection)
+        // does not pick them up and surface them in the public photo grid.
+        const path = `${storagePathPrefix || 'stories'}/${safeProject}/${lang}/${Date.now()}_${file.name}`;
         const url = await uploadFileToStorage(optimized || file, path);
-        updateBlock(idx, { url });
+        setStory(prev => ({
+          ...prev,
+          [lang]: (prev[lang] || []).map((b, i) => i === idx ? { ...b, url } : b)
+        }));
       } catch (err) {
         console.error(err);
         alert('Image upload failed');
@@ -545,6 +568,12 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
     };
 
     const handleSave = () => {
+      // Block save while an upload is mid-flight; otherwise the empty-url
+      // block gets stripped below and the image silently disappears.
+      if (uploadingBlockIdx !== null) {
+        alert('Please wait for the image upload to finish.');
+        return;
+      }
       // Strip empty blocks before saving (a text block with no content, or
       // an image block with no url, is just noise on the public side).
       const cleanedStory = {
@@ -772,7 +801,13 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
             {/* Footer actions */}
             <div className="flex gap-3 px-5 md:px-6 py-4 border-t border-neutral-800 flex-shrink-0">
               <button onClick={onClose} className="flex-1 py-2 text-neutral-400 hover:text-white text-sm">Cancel</button>
-              <button onClick={handleSave} className="flex-1 py-2 bg-white text-black font-bold rounded hover:bg-neutral-200 text-sm">Save Changes</button>
+              <button
+                onClick={handleSave}
+                disabled={uploadingBlockIdx !== null}
+                className={`flex-1 py-2 bg-white text-black font-bold rounded hover:bg-neutral-200 text-sm ${uploadingBlockIdx !== null ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                {uploadingBlockIdx !== null ? 'Uploading…' : 'Save Changes'}
+              </button>
             </div>
          </div>
       </div>
@@ -1764,7 +1799,7 @@ const PhotosManager = ({ photos, onAddPhoto, onDeletePhoto, onBatchUpdate }) => 
           onClose={() => setEditingProjectData(null)}
           initialData={editingProjectData}
           onSave={handleSaveProjectEdit}
-          storagePathPrefix={editingProjectData ? `photos/${editingProjectData.oldYear}` : 'photos'}
+          storagePathPrefix={editingProjectData ? `stories/${editingProjectData.oldYear}` : 'stories'}
        />
     </div>
   );
