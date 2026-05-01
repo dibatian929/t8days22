@@ -39,7 +39,10 @@ import {
   Aperture, 
   Home,
   ToggleLeft,
-  ToggleRight
+  ToggleRight,
+  BookOpen,
+  FileText,
+  GripVertical
 } from "lucide-react";
 import { initializeApp } from "firebase/app";
 import { 
@@ -286,9 +289,9 @@ injectStyles();
 const APP_CONFIG = { adminPasscode: "8888" };
 
 const UI_TEXT = {
-  cn: { works: "作品", about: "关于", language: "语言", set: "设置" },
-  en: { works: "WORKS", about: "ABOUT", language: "LANGUAGE", set: "SET" },
-  th: { works: "ผลงาน", about: "เกี่ยวกับ", language: "ภาษา", set: "ตั้งค่า" },
+  cn: { works: "作品", about: "关于", language: "语言", set: "设置", readStory: "阅读手记" },
+  en: { works: "WORKS", about: "ABOUT", language: "LANGUAGE", set: "SET", readStory: "Read story" },
+  th: { works: "ผลงาน", about: "เกี่ยวกับ", language: "ภาษา", set: "ตั้งค่า", readStory: "อ่านบันทึก" },
 };
 
 const DEFAULT_SLIDES = [
@@ -361,9 +364,111 @@ const LoginModal = ({ isOpen, onClose, onLogin }) => {
 };
 
 // 项目信息编辑弹窗
-const ProjectEditModal = ({ isOpen, onClose, initialData, onSave }) => {
+// --- Project Story Reader Modal (front-end) ---
+// Immersive full-screen reading view: scrollable page with mixed text/image blocks.
+// Sans-serif body for legibility; serif title to echo the rest of the site.
+const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handleKey);
+    // Lock background scroll while modal is open
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", handleKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-[300] bg-neutral-950 overflow-y-auto animate-fade-in-up"
+      style={{ WebkitOverflowScrolling: "touch" }}
+    >
+      {/* Fixed top bar — title left, close right */}
+      <div className="sticky top-0 z-10 flex items-center justify-between px-6 md:px-12 py-5 bg-gradient-to-b from-neutral-950 via-neutral-950/90 to-transparent backdrop-blur-sm">
+        <h2 className="text-sm md:text-base font-serif tracking-[0.25em] uppercase text-white/60 truncate pr-4">
+          {projectTitle}
+        </h2>
+        <button
+          onClick={onClose}
+          className="text-white/60 hover:text-white transition-colors flex-shrink-0"
+          aria-label="Close"
+        >
+          <X size={22} />
+        </button>
+      </div>
+
+      {/* Reading area — narrow column for comfortable line-length */}
+      <div className="max-w-[720px] mx-auto px-6 md:px-0 pt-8 md:pt-16 pb-32">
+        {(!blocks || blocks.length === 0) && (
+          <p className="text-neutral-600 text-center py-20 text-sm tracking-widest uppercase">
+            No content
+          </p>
+        )}
+
+        {blocks && blocks.map((block, idx) => {
+          if (block.type === "text") {
+            // Split paragraphs on blank lines so editors can author multi-paragraph
+            // text blocks naturally with a single textarea.
+            const paragraphs = (block.content || "").split(/\n\s*\n/).filter(Boolean);
+            return (
+              <div key={idx} className="mb-10 md:mb-12">
+                {paragraphs.map((para, pIdx) => (
+                  <p
+                    key={pIdx}
+                    className="font-sans text-neutral-300 text-base md:text-lg leading-[1.9] mb-6 last:mb-0 whitespace-pre-wrap"
+                    style={{ fontWeight: 300 }}
+                  >
+                    {para}
+                  </p>
+                ))}
+              </div>
+            );
+          }
+          if (block.type === "image") {
+            return (
+              <figure key={idx} className="my-12 md:my-16 -mx-6 md:mx-0">
+                <img
+                  src={block.url}
+                  alt={block.caption || ""}
+                  loading="lazy"
+                  className="w-full h-auto block"
+                />
+                {block.caption && (
+                  <figcaption className="font-sans text-neutral-500 text-xs md:text-sm leading-relaxed mt-3 px-6 md:px-0 italic">
+                    {block.caption}
+                  </figcaption>
+                )}
+              </figure>
+            );
+          }
+          return null;
+        })}
+
+        {/* Bottom signature line */}
+        {blocks && blocks.length > 0 && (
+          <div className="pt-12 mt-16 border-t border-neutral-900 text-center">
+            <p className="text-neutral-700 text-[10px] tracking-[0.3em] uppercase font-sans">
+              {projectTitle}
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPrefix }) => {
     const [formData, setFormData] = useState({ en: '', cn: '', th: '' });
-    
+    const [story, setStory] = useState({ en: [], cn: [], th: [] });
+    const [activeStoryTab, setActiveStoryTab] = useState('en');
+    const [storyExpanded, setStoryExpanded] = useState(false);
+    const [uploadingBlockIdx, setUploadingBlockIdx] = useState(null);
+
     useEffect(() => {
       if (initialData) {
         setFormData({
@@ -371,32 +476,303 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave }) => {
           cn: initialData.cn || '',
           th: initialData.th || ''
         });
+        // Defensive: ensure each language has at least an empty array
+        const incoming = initialData.story || {};
+        setStory({
+          en: Array.isArray(incoming.en) ? incoming.en : [],
+          cn: Array.isArray(incoming.cn) ? incoming.cn : [],
+          th: Array.isArray(incoming.th) ? incoming.th : []
+        });
+        // Auto-expand the story panel if there is already content in any language
+        const hasContent = ['en', 'cn', 'th'].some(l =>
+          Array.isArray(incoming[l]) && incoming[l].length > 0
+        );
+        setStoryExpanded(hasContent);
+        setActiveStoryTab('en');
       }
     }, [initialData]);
-  
+
     if (!isOpen) return null;
-  
+
+    // --- Block manipulation helpers (operate on currently active language tab) ---
+    const currentBlocks = story[activeStoryTab] || [];
+
+    const updateBlocks = (newBlocks) => {
+      setStory({ ...story, [activeStoryTab]: newBlocks });
+    };
+
+    const addTextBlock = () => {
+      updateBlocks([...currentBlocks, { type: 'text', content: '' }]);
+    };
+
+    const addImageBlock = () => {
+      updateBlocks([...currentBlocks, { type: 'image', url: '', caption: '' }]);
+    };
+
+    const updateBlock = (idx, patch) => {
+      const next = currentBlocks.map((b, i) => i === idx ? { ...b, ...patch } : b);
+      updateBlocks(next);
+    };
+
+    const deleteBlock = (idx) => {
+      if (!confirm('Delete this block?')) return;
+      updateBlocks(currentBlocks.filter((_, i) => i !== idx));
+    };
+
+    const moveBlock = (idx, dir) => {
+      const newIdx = dir === 'up' ? idx - 1 : idx + 1;
+      if (newIdx < 0 || newIdx >= currentBlocks.length) return;
+      const next = [...currentBlocks];
+      [next[idx], next[newIdx]] = [next[newIdx], next[idx]];
+      updateBlocks(next);
+    };
+
+    const handleImageUpload = async (idx, file) => {
+      if (!file) return;
+      setUploadingBlockIdx(idx);
+      try {
+        const optimized = await compressImage(file, 1920, 0.85);
+        const safeProject = (formData.en || initialData?.oldProject || 'project').trim() || 'project';
+        const path = `${storagePathPrefix || 'photos'}/${safeProject}/story/${Date.now()}_${file.name}`;
+        const url = await uploadFileToStorage(optimized || file, path);
+        updateBlock(idx, { url });
+      } catch (err) {
+        console.error(err);
+        alert('Image upload failed');
+      } finally {
+        setUploadingBlockIdx(null);
+      }
+    };
+
+    const handleSave = () => {
+      // Strip empty blocks before saving (a text block with no content, or
+      // an image block with no url, is just noise on the public side).
+      const cleanedStory = {
+        en: (story.en || []).filter(b =>
+          (b.type === 'text' && (b.content || '').trim()) ||
+          (b.type === 'image' && (b.url || '').trim())
+        ),
+        cn: (story.cn || []).filter(b =>
+          (b.type === 'text' && (b.content || '').trim()) ||
+          (b.type === 'image' && (b.url || '').trim())
+        ),
+        th: (story.th || []).filter(b =>
+          (b.type === 'text' && (b.content || '').trim()) ||
+          (b.type === 'image' && (b.url || '').trim())
+        ),
+      };
+      onSave({ ...formData, story: cleanedStory });
+    };
+
     return (
-      <div className="fixed inset-0 z-[200] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-         <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 w-full max-w-md shadow-2xl animate-fade-in-up">
-            <h3 className="text-white text-lg font-bold mb-4">Edit Project Info</h3>
-            <div className="space-y-3">
-                <div>
-                    <label className="text-xs text-neutral-500 uppercase mb-1 block">Project ID / English Name (EN)</label>
-                    <input className="w-full bg-black border border-neutral-700 rounded p-2 text-white text-sm" value={formData.en} onChange={e => setFormData({...formData, en: e.target.value})} />
-                </div>
-                <div>
-                    <label className="text-xs text-neutral-500 uppercase mb-1 block">Chinese Name (CN)</label>
-                    <input className="w-full bg-black border border-neutral-700 rounded p-2 text-white text-sm" value={formData.cn} onChange={e => setFormData({...formData, cn: e.target.value})} />
-                </div>
-                <div>
-                    <label className="text-xs text-neutral-500 uppercase mb-1 block">Thai Name (TH)</label>
-                    <input className="w-full bg-black border border-neutral-700 rounded p-2 text-white text-sm" value={formData.th} onChange={e => setFormData({...formData, th: e.target.value})} />
-                </div>
+      <div className="fixed inset-0 z-[200] bg-black/80 backdrop-blur-sm flex items-center justify-center p-2 md:p-4">
+         <div className="bg-neutral-900 border border-neutral-800 rounded-xl w-full max-w-3xl shadow-2xl animate-fade-in-up max-h-[95vh] flex flex-col">
+            {/* Header */}
+            <div className="px-5 md:px-6 pt-5 md:pt-6 pb-3 border-b border-neutral-800 flex items-center justify-between flex-shrink-0">
+              <h3 className="text-white text-base md:text-lg font-bold">Edit Project Info</h3>
+              <button onClick={onClose} className="text-neutral-500 hover:text-white p-1" aria-label="Close">
+                <X size={18} />
+              </button>
             </div>
-            <div className="flex gap-3 mt-6">
-                <button onClick={onClose} className="flex-1 py-2 text-neutral-400 hover:text-white text-sm">Cancel</button>
-                <button onClick={() => onSave(formData)} className="flex-1 py-2 bg-white text-black font-bold rounded hover:bg-neutral-200 text-sm">Save Changes</button>
+
+            {/* Scrollable body */}
+            <div className="overflow-y-auto px-5 md:px-6 py-5 flex-1" style={{ WebkitOverflowScrolling: 'touch' }}>
+              {/* Title fields */}
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs text-neutral-500 uppercase mb-1 block">Project ID / English Name (EN)</label>
+                  <input className="w-full bg-black border border-neutral-700 rounded p-2 text-white text-sm" value={formData.en} onChange={e => setFormData({...formData, en: e.target.value})} />
+                </div>
+                <div>
+                  <label className="text-xs text-neutral-500 uppercase mb-1 block">Chinese Name (CN)</label>
+                  <input className="w-full bg-black border border-neutral-700 rounded p-2 text-white text-sm" value={formData.cn} onChange={e => setFormData({...formData, cn: e.target.value})} />
+                </div>
+                <div>
+                  <label className="text-xs text-neutral-500 uppercase mb-1 block">Thai Name (TH)</label>
+                  <input className="w-full bg-black border border-neutral-700 rounded p-2 text-white text-sm" value={formData.th} onChange={e => setFormData({...formData, th: e.target.value})} />
+                </div>
+              </div>
+
+              {/* Story editor — collapsible */}
+              <div className="mt-6 border-t border-neutral-800 pt-5">
+                <button
+                  onClick={() => setStoryExpanded(!storyExpanded)}
+                  className="w-full flex items-center justify-between text-left group"
+                >
+                  <div className="flex items-center gap-2">
+                    <BookOpen size={14} className="text-neutral-400" />
+                    <span className="text-sm font-bold text-white">Project Story</span>
+                    <span className="text-xs text-neutral-500">(Optional)</span>
+                  </div>
+                  <ChevronDown size={16} className={`text-neutral-500 transition-transform ${storyExpanded ? 'rotate-180' : ''}`} />
+                </button>
+
+                {storyExpanded && (
+                  <div className="mt-4">
+                    {/* Language tabs */}
+                    <div className="flex gap-1 mb-3 bg-black/40 p-1 rounded">
+                      {['en', 'cn', 'th'].map(l => {
+                        const count = (story[l] || []).length;
+                        return (
+                          <button
+                            key={l}
+                            onClick={() => setActiveStoryTab(l)}
+                            className={`flex-1 py-1.5 text-xs font-bold uppercase tracking-wider rounded transition-colors ${
+                              activeStoryTab === l
+                                ? 'bg-white text-black'
+                                : 'text-neutral-500 hover:text-white'
+                            }`}
+                          >
+                            {l === 'cn' ? '中文' : l === 'en' ? 'English' : 'ไทย'}
+                            {count > 0 && (
+                              <span className={`ml-1 text-[10px] ${activeStoryTab === l ? 'text-neutral-500' : 'text-neutral-600'}`}>
+                                ({count})
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Block list */}
+                    <div className="space-y-2 mb-3">
+                      {currentBlocks.length === 0 && (
+                        <div className="text-center py-6 text-neutral-600 text-xs italic">
+                          No content yet — add a paragraph or image below.
+                        </div>
+                      )}
+
+                      {currentBlocks.map((block, idx) => (
+                        <div
+                          key={idx}
+                          className="bg-black/40 border border-neutral-800 rounded-lg p-3 group"
+                        >
+                          {/* Block toolbar */}
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-neutral-500 font-bold">
+                              {block.type === 'text' ? <Type size={11} /> : <ImageIcon size={11} />}
+                              <span>{block.type === 'text' ? 'Paragraph' : 'Image'}</span>
+                              <span className="text-neutral-700">#{idx + 1}</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => moveBlock(idx, 'up')}
+                                disabled={idx === 0}
+                                className="p-1 text-neutral-500 hover:text-white disabled:opacity-20 disabled:hover:text-neutral-500"
+                                title="Move up"
+                              >
+                                <ArrowUp size={13} />
+                              </button>
+                              <button
+                                onClick={() => moveBlock(idx, 'down')}
+                                disabled={idx === currentBlocks.length - 1}
+                                className="p-1 text-neutral-500 hover:text-white disabled:opacity-20 disabled:hover:text-neutral-500"
+                                title="Move down"
+                              >
+                                <ArrowDown size={13} />
+                              </button>
+                              <button
+                                onClick={() => deleteBlock(idx)}
+                                className="p-1 text-neutral-500 hover:text-red-400"
+                                title="Delete block"
+                              >
+                                <Trash size={13} />
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Block body */}
+                          {block.type === 'text' && (
+                            <textarea
+                              value={block.content || ''}
+                              onChange={e => updateBlock(idx, { content: e.target.value })}
+                              placeholder="Write your paragraph here. Leave a blank line to start a new paragraph."
+                              rows={5}
+                              className="w-full bg-black border border-neutral-700 rounded p-2 text-white text-sm leading-relaxed resize-y"
+                            />
+                          )}
+
+                          {block.type === 'image' && (
+                            <div className="space-y-2">
+                              {block.url ? (
+                                <div className="relative">
+                                  <img
+                                    src={block.url}
+                                    alt=""
+                                    className="w-full max-h-64 object-contain bg-neutral-950 rounded"
+                                  />
+                                  <label className="absolute top-2 right-2 px-2 py-1 bg-black/70 hover:bg-black text-white text-[10px] uppercase tracking-wider rounded cursor-pointer">
+                                    Replace
+                                    <input
+                                      type="file"
+                                      accept="image/*"
+                                      className="hidden"
+                                      onChange={e => handleImageUpload(idx, e.target.files[0])}
+                                    />
+                                  </label>
+                                </div>
+                              ) : (
+                                <label className={`flex flex-col items-center justify-center py-6 border border-dashed border-neutral-700 rounded cursor-pointer hover:border-neutral-500 hover:bg-black/30 transition-colors ${uploadingBlockIdx === idx ? 'opacity-50 pointer-events-none' : ''}`}>
+                                  {uploadingBlockIdx === idx ? (
+                                    <>
+                                      <Loader2 size={20} className="text-neutral-500 animate-spin mb-2" />
+                                      <span className="text-xs text-neutral-500">Uploading…</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <UploadCloud size={20} className="text-neutral-500 mb-2" />
+                                      <span className="text-xs text-neutral-500">Click to upload image</span>
+                                    </>
+                                  )}
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={e => handleImageUpload(idx, e.target.files[0])}
+                                  />
+                                </label>
+                              )}
+                              <input
+                                type="text"
+                                value={block.caption || ''}
+                                onChange={e => updateBlock(idx, { caption: e.target.value })}
+                                placeholder="Caption (optional)"
+                                className="w-full bg-black border border-neutral-700 rounded p-2 text-neutral-400 text-xs italic"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Add buttons */}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={addTextBlock}
+                        className="flex-1 flex items-center justify-center gap-2 py-2 bg-black border border-neutral-700 rounded text-xs uppercase tracking-wider text-neutral-300 hover:border-neutral-500 hover:text-white transition-colors"
+                      >
+                        <Plus size={13} /> Paragraph
+                      </button>
+                      <button
+                        onClick={addImageBlock}
+                        className="flex-1 flex items-center justify-center gap-2 py-2 bg-black border border-neutral-700 rounded text-xs uppercase tracking-wider text-neutral-300 hover:border-neutral-500 hover:text-white transition-colors"
+                      >
+                        <Plus size={13} /> Image
+                      </button>
+                    </div>
+
+                    <p className="text-[10px] text-neutral-600 mt-3 leading-relaxed">
+                      Each language is independent. A language with no blocks won't show the "Read story" link on the public site.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Footer actions */}
+            <div className="flex gap-3 px-5 md:px-6 py-4 border-t border-neutral-800 flex-shrink-0">
+              <button onClick={onClose} className="flex-1 py-2 text-neutral-400 hover:text-white text-sm">Cancel</button>
+              <button onClick={handleSave} className="flex-1 py-2 bg-white text-black font-bold rounded hover:bg-neutral-200 text-sm">Save Changes</button>
             </div>
          </div>
       </div>
@@ -941,7 +1317,7 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
   );
 };
 
-const ProjectRow = ({ projectTitle, photos, onImageClick }) => {
+const ProjectRow = ({ projectTitle, photos, onImageClick, storyBlocks, readStoryLabel, onStoryClick }) => {
   const [showOverlay, setShowOverlay] = useState(false);
   const hoverTimeoutRef = useRef(null);
   const scrollContainerRef = useRef(null);
@@ -977,14 +1353,37 @@ const ProjectRow = ({ projectTitle, photos, onImageClick }) => {
   };
 
   const isProjectTitleVisible = showOverlay && window.innerWidth >= 768;
+  const hasStory = Array.isArray(storyBlocks) && storyBlocks.length > 0;
 
   return (
     <div className="relative group/row mb-8 md:mb-12 transition-all duration-1000" onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave} onMouseMove={handleMouseMove}>
       
-      <div className="md:hidden mb-2 px-1 flex items-center gap-2">
-        <h3 className="text-lg font-serif text-white/90 tracking-widest uppercase">{projectTitle}</h3>
-        <div className="h-[1px] flex-grow bg-white/10"></div>
+      {/* Mobile title bar */}
+      <div className="md:hidden mb-2 px-1">
+        <div className="flex items-center gap-2">
+          <h3 className="text-lg font-serif text-white/90 tracking-widest uppercase">{projectTitle}</h3>
+          <div className="h-[1px] flex-grow bg-white/10"></div>
+        </div>
+        {hasStory && (
+          <button
+            onClick={onStoryClick}
+            className="mt-1.5 inline-flex items-center gap-1 text-[10px] tracking-[0.2em] uppercase text-white/40 active:text-white transition-colors font-sans"
+          >
+            {readStoryLabel} <span aria-hidden="true">→</span>
+          </button>
+        )}
       </div>
+
+      {/* Desktop "Read story" — sits in the top-right area, always visible.
+          Placed above the scroll strip with z-20 so it survives the hover dim. */}
+      {hasStory && (
+        <button
+          onClick={onStoryClick}
+          className="hidden md:inline-flex absolute top-0 right-4 -translate-y-6 items-center gap-1 text-[10px] tracking-[0.25em] uppercase text-white/40 hover:text-white transition-colors font-sans z-20"
+        >
+          {readStoryLabel} <span aria-hidden="true">→</span>
+        </button>
+      )}
 
       <div className={`hidden md:flex absolute inset-0 z-10 items-center justify-start pl-4 pointer-events-none transition-opacity duration-500 ease-out ${isProjectTitleVisible ? "opacity-100" : "opacity-0"}`}>
         <h3 className="text-2xl md:text-3xl font-thin text-white/80 tracking-widest uppercase drop-shadow-2xl mix-blend-difference font-serif">{projectTitle}</h3>
@@ -1013,6 +1412,9 @@ const ProjectRow = ({ projectTitle, photos, onImageClick }) => {
 };
 
 const WorksPage = ({ photos, profile, ui, onImageClick, lang }) => {
+  const [activeStory, setActiveStory] = useState(null);
+  const uiText = ui || UI_TEXT.en;
+
   const groupedByYearAndProject = photos.reduce((acc, photo) => {
     const year = photo.year ? String(photo.year).trim() : "Unsorted";
     const project = photo.project ? String(photo.project).trim() : "Uncategorized";
@@ -1032,6 +1434,16 @@ const WorksPage = ({ photos, profile, ui, onImageClick, lang }) => {
       });
   };
 
+  // Pull the story for the *current* language only — other languages don't
+  // surface in this view, so we don't bother passing them down.
+  const getStoryForLang = (firstPhoto) => {
+    const story = firstPhoto?.projectStory;
+    if (!story || typeof story !== 'object') return null;
+    const blocks = story[lang];
+    if (!Array.isArray(blocks) || blocks.length === 0) return null;
+    return blocks;
+  };
+
   return (
     <div className="min-h-screen bg-neutral-950 text-white animate-fade-in-up">
       <div className="pt-28 md:pt-32 pb-32 px-4 md:px-12 container mx-auto max-w-[1920px]">
@@ -1046,9 +1458,18 @@ const WorksPage = ({ photos, profile, ui, onImageClick, lang }) => {
                 const projectPhotos = groupedByYearAndProject[year][projectKey].sort((a,b) => (a.order || 0) - (b.order || 0));
                 const firstPhoto = projectPhotos[0];
                 const displayTitle = firstPhoto.projectTitles?.[lang] || projectKey;
+                const storyBlocks = getStoryForLang(firstPhoto);
 
                 return (
-                  <ProjectRow key={projectKey} projectTitle={displayTitle} photos={projectPhotos} onImageClick={onImageClick} />
+                  <ProjectRow
+                    key={projectKey}
+                    projectTitle={displayTitle}
+                    photos={projectPhotos}
+                    onImageClick={onImageClick}
+                    storyBlocks={storyBlocks}
+                    readStoryLabel={uiText.readStory}
+                    onStoryClick={() => setActiveStory({ title: displayTitle, blocks: storyBlocks })}
+                  />
                 );
               })}
             </div>
@@ -1059,6 +1480,13 @@ const WorksPage = ({ photos, profile, ui, onImageClick, lang }) => {
           <p className="text-neutral-600 text-[10px] tracking-[0.3em] uppercase font-sans">© {new Date().getFullYear()} {profile.brandName}</p>
         </div>
       </div>
+
+      <ProjectStoryModal
+        isOpen={!!activeStory}
+        onClose={() => setActiveStory(null)}
+        projectTitle={activeStory?.title || ''}
+        blocks={activeStory?.blocks || []}
+      />
     </div>
   );
 };
@@ -1175,12 +1603,20 @@ const PhotosManager = ({ photos, onAddPhoto, onDeletePhoto, onBatchUpdate }) => 
      const projectPhotos = photos.filter(p => p.year === year && p.project === project);
      const firstPhoto = projectPhotos[0];
      const titles = firstPhoto?.projectTitles || { en: project, cn: '', th: '' };
+     // Pull existing story (if any). We use the first photo as the source of truth —
+     // the story is replicated across all photos in a project so they stay in sync.
+     const existingStory = firstPhoto?.projectStory || { en: [], cn: [], th: [] };
      setEditingProjectData({
          oldYear: year,
          oldProject: project,
          en: titles.en || project,
          cn: titles.cn || '',
-         th: titles.th || ''
+         th: titles.th || '',
+         story: {
+             en: Array.isArray(existingStory.en) ? existingStory.en : [],
+             cn: Array.isArray(existingStory.cn) ? existingStory.cn : [],
+             th: Array.isArray(existingStory.th) ? existingStory.th : [],
+         }
      });
   };
 
@@ -1189,13 +1625,17 @@ const PhotosManager = ({ photos, onAddPhoto, onDeletePhoto, onBatchUpdate }) => 
       setUploading(true);
       const { oldYear, oldProject } = editingProjectData;
       const toUpdate = photos.filter(p => p.year === oldYear && p.project === oldProject);
-      
+
+      // newData shape: { en, cn, th, story: { en: [...], cn: [...], th: [...] } }
+      const { story, ...titles } = newData;
+
       const updates = toUpdate.map(p => ({
           id: p.id,
-          project: newData.en, 
-          projectTitles: newData
+          project: titles.en,
+          projectTitles: titles,
+          projectStory: story || { en: [], cn: [], th: [] }
       }));
-      
+
       await onBatchUpdate(updates);
       setUploading(false);
       setEditingProjectData(null);
@@ -1324,6 +1764,7 @@ const PhotosManager = ({ photos, onAddPhoto, onDeletePhoto, onBatchUpdate }) => 
           onClose={() => setEditingProjectData(null)}
           initialData={editingProjectData}
           onSave={handleSaveProjectEdit}
+          storagePathPrefix={editingProjectData ? `photos/${editingProjectData.oldYear}` : 'photos'}
        />
     </div>
   );
