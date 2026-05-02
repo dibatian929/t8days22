@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, Component } from "react";
+import { createPortal } from "react-dom";
 import {
   Camera,
   Mail,
@@ -382,8 +383,16 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
   }, [isOpen, onClose]);
 
   if (!isOpen) return null;
+  if (typeof document === "undefined") return null;
 
-  return (
+  // Portal to <body>. The modal lives inside WorksPage in the React tree, but
+  // WorksPage's root has `animate-fade-in-up` whose final keyframe leaves a
+  // `transform: translateY(0)` (with animation-fill-mode: forwards). A non-none
+  // transform on an ancestor turns that ancestor into the containing block for
+  // any descendant `position: fixed`, so without this portal the modal would
+  // be pinned to WorksPage's full document-height box instead of the viewport
+  // — making the sticky close button drift off-screen and breaking scroll.
+  return createPortal(
     <div
       className="fixed inset-0 z-[300] bg-neutral-950 overflow-y-auto animate-fade-in-up"
       style={{ WebkitOverflowScrolling: "touch" }}
@@ -395,7 +404,7 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
         </h2>
         <button
           onClick={onClose}
-          className="text-white/60 hover:text-white transition-colors flex-shrink-0"
+          className="text-white/60 hover:text-white transition-colors flex-shrink-0 p-3 -m-3 rounded-full hover:bg-white/5"
           aria-label="Close"
         >
           <X size={22} />
@@ -449,16 +458,24 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
           return null;
         })}
 
-        {/* Bottom signature line */}
+        {/* Bottom signature line + secondary close affordance, so a reader who
+            scrolled past the sticky header doesn't have to scroll back up. */}
         {blocks && blocks.length > 0 && (
           <div className="pt-12 mt-16 border-t border-neutral-900 text-center">
-            <p className="text-neutral-700 text-[10px] tracking-[0.3em] uppercase font-sans">
+            <p className="text-neutral-700 text-[10px] tracking-[0.3em] uppercase font-sans mb-6">
               {projectTitle}
             </p>
+            <button
+              onClick={onClose}
+              className="inline-flex items-center gap-2 text-[10px] tracking-[0.3em] uppercase text-white/50 hover:text-white transition-colors font-sans py-2 px-4 border border-white/10 rounded-full hover:border-white/30"
+            >
+              <X size={12} /> Close
+            </button>
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };
 
