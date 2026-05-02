@@ -1391,8 +1391,13 @@ const ProjectRow = ({ projectTitle, photos, onImageClick, storyBlocks, readStory
   const hasStory = Array.isArray(storyBlocks) && storyBlocks.length > 0;
 
   return (
-    <div className="relative group/row mb-8 md:mb-12 transition-all duration-1000" onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave} onMouseMove={handleMouseMove}>
-      
+    <div
+      className={`relative group/row mb-8 md:mb-12 transition-all duration-1000 ${hasStory ? 'md:pt-6' : ''}`}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+      onMouseMove={handleMouseMove}
+    >
+
       {/* Mobile title bar */}
       <div className="md:hidden mb-2 px-1">
         <div className="flex items-center gap-2">
@@ -1409,12 +1414,15 @@ const ProjectRow = ({ projectTitle, photos, onImageClick, storyBlocks, readStory
         )}
       </div>
 
-      {/* Desktop "Read story" — sits in the top-right area, always visible.
-          Placed above the scroll strip with z-20 so it survives the hover dim. */}
+      {/* Desktop "Read story" — sits inside the row's reserved md:pt-6 area
+          (above the photo strip). Earlier this used `-translate-y-6` to float
+          above the row, but the parent column in WorksPage has overflow-hidden,
+          which clipped the button on the first row of each year. Placing it
+          inside the row keeps it visible regardless of parent overflow. */}
       {hasStory && (
         <button
           onClick={onStoryClick}
-          className="hidden md:inline-flex absolute top-0 right-4 -translate-y-6 items-center gap-1 text-[10px] tracking-[0.25em] uppercase text-white/40 hover:text-white transition-colors font-sans z-20"
+          className="hidden md:inline-flex absolute top-0 right-4 items-center gap-1 text-[10px] tracking-[0.25em] uppercase text-white/40 hover:text-white transition-colors font-sans z-20"
         >
           {readStoryLabel} <span aria-hidden="true">→</span>
         </button>
