@@ -60,6 +60,7 @@ import {
   updateDoc,
   deleteDoc,
   doc,
+  getDoc,
   onSnapshot,
   query,
   orderBy,
@@ -68,6 +69,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { getFunctions, httpsCallable } from "firebase/functions";
 
 // --- 0. 系统初始化 ---
 
@@ -81,7 +83,7 @@ const MANUAL_CONFIG = {
   measurementId: "G-FLLBH5DTNV",
 };
 
-let app, auth, db, storage;
+let app, auth, db, storage, functions;
 
 try {
   let firebaseConfig = MANUAL_CONFIG;
@@ -92,17 +94,44 @@ try {
         console.warn("Config parse error, using manual.");
     }
   }
-  
+
   app = initializeApp(firebaseConfig);
   auth = getAuth(app);
   db = getFirestore(app);
   storage = getStorage(app);
+  // Region must match the one in functions/index.js (default: us-central1).
+  functions = getFunctions(app, "us-central1");
   console.log("Firebase initialized successfully");
 } catch (e) {
   console.error("Firebase Init Critical Error:", e);
 }
 
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- Callable Cloud Function helper ---
+// Thin wrapper so call sites read cleanly:
+//   const { token } = await callFn('adminLogin', { passcode });
+const callFn = async (name, data) => {
+  if (!functions) throw new Error("Functions not ready");
+  const fn = httpsCallable(functions, name);
+  const result = await fn(data || {});
+  return result.data;
+};
+
+// --- Stable opaque project ID, used as the privateStories doc key and as
+// the Storage segment for private images. Generated once when the admin
+// first turns a project private; persisted on every photo in the project.
+const generateProjectId = () => {
+  return 'p-' + 'xxxxxxxxxxxxxxxx'.replace(/x/g, () =>
+    Math.floor(Math.random() * 16).toString(16)
+  ) + Date.now().toString(36);
+};
+
+// --- Private story Firestore doc reference (mirror of the Cloud Function).
+const getPrivateStoryDoc = (projectId) => {
+  if (!db) return null;
+  return doc(db, 'artifacts', appId, 'private', 'data', 'stories', projectId);
+};
 
 // 辅助函数
 const getPublicCollection = (colName) => {
@@ -479,12 +508,91 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
   );
 };
 
+// --- Password prompt for unlocking a private story (front-end) ---
+// Portal'd to body for the same containing-block reason ProjectStoryModal is.
+// On submit, the parent calls the unlockStory Cloud Function and, on success,
+// closes this modal and opens the story.
+const PasswordPromptModal = ({ isOpen, onClose, onSubmit, projectTitle, error, busy }) => {
+  const [pwd, setPwd] = useState('');
+  useEffect(() => {
+    if (!isOpen) return;
+    setPwd('');
+    const handleKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[310] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-neutral-900 border border-neutral-800 rounded-xl p-8 max-w-sm w-full shadow-2xl animate-fade-in-up"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Lock className="w-7 h-7 text-amber-400 mx-auto mb-3" />
+        <h3 className="text-white text-center text-sm font-serif tracking-[0.25em] uppercase mb-1">
+          Private story
+        </h3>
+        <p className="text-neutral-500 text-center text-xs mb-6 tracking-wider">
+          {projectTitle}
+        </p>
+        <form
+          onSubmit={(e) => { e.preventDefault(); if (!busy && pwd) onSubmit(pwd); }}
+        >
+          <input
+            type="password"
+            value={pwd}
+            onChange={(e) => setPwd(e.target.value)}
+            placeholder="Password"
+            disabled={busy}
+            className="w-full bg-black border border-neutral-700 rounded px-4 py-3 text-white text-center tracking-[0.4em] mb-2 focus:outline-none focus:border-white transition-colors"
+            autoFocus
+          />
+          {error && (
+            <p className="text-red-400/80 text-xs text-center mb-3 tracking-wider">{error}</p>
+          )}
+          <div className="flex gap-3 mt-4">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 py-3 text-neutral-500 hover:text-white text-xs uppercase tracking-wider transition-colors"
+              disabled={busy}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={busy || !pwd}
+              className="flex-1 py-3 bg-white text-black font-bold rounded text-xs uppercase tracking-wider hover:bg-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {busy ? 'Unlocking…' : 'Unlock'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>,
+    document.body
+  );
+};
+
 const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPrefix }) => {
     const [formData, setFormData] = useState({ en: '', cn: '', th: '' });
     const [story, setStory] = useState({ en: [], cn: [], th: [] });
     const [activeStoryTab, setActiveStoryTab] = useState('en');
     const [storyExpanded, setStoryExpanded] = useState(false);
     const [uploadingBlockIdx, setUploadingBlockIdx] = useState(null);
+    // Private-mode state. `isPrivate` is the toggle; `privateStoryId` is the
+    // stable opaque key under which the locked story is stored (also used as
+    // the /private/{projectId}/ Storage segment). `password` is plaintext,
+    // only used to call setPrivateStory — never stored locally.
+    const [isPrivate, setIsPrivate] = useState(false);
+    const [privateStoryId, setPrivateStoryId] = useState(null);
+    const [password, setPassword] = useState('');
 
     useEffect(() => {
       if (initialData) {
@@ -504,8 +612,11 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
         const hasContent = ['en', 'cn', 'th'].some(l =>
           Array.isArray(incoming[l]) && incoming[l].length > 0
         );
-        setStoryExpanded(hasContent);
+        setStoryExpanded(hasContent || !!initialData.isPrivate);
         setActiveStoryTab('en');
+        setIsPrivate(!!initialData.isPrivate);
+        setPrivateStoryId(initialData.privateStoryId || null);
+        setPassword('');
       }
     }, [initialData]);
 
@@ -565,12 +676,26 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
       setUploadingBlockIdx(idx);
       try {
         const optimized = await compressImage(file, 1920, 0.85);
-        const safeProject = (formData.en || initialData?.oldProject || 'project').trim() || 'project';
-        // Story images live under `stories/` — a separate Storage root from
-        // `photos/` — so any external listener on `photos/` (e.g. a Cloud
-        // Function that mirrors uploads into the photos Firestore collection)
-        // does not pick them up and surface them in the public photo grid.
-        const path = `${storagePathPrefix || 'stories'}/${safeProject}/${lang}/${Date.now()}_${file.name}`;
+
+        let path;
+        if (isPrivate) {
+          // Private images live under /private/{privateStoryId}/... .
+          // Storage rules restrict read access to admins + unlock-token
+          // holders. If this is the first time the project is being made
+          // private, we won't have a privateStoryId yet — mint one now and
+          // hand it back to the parent on save.
+          let pid = privateStoryId;
+          if (!pid) {
+            pid = generateProjectId();
+            setPrivateStoryId(pid);
+          }
+          path = `private/${pid}/${lang}/${Date.now()}_${file.name}`;
+        } else {
+          // Public story images stay at /stories/... (publicly readable).
+          const safeProject = (formData.en || initialData?.oldProject || 'project').trim() || 'project';
+          path = `${storagePathPrefix || 'stories'}/${safeProject}/${lang}/${Date.now()}_${file.name}`;
+        }
+
         const url = await uploadFileToStorage(optimized || file, path);
         setStory(prev => ({
           ...prev,
@@ -578,7 +703,7 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
         }));
       } catch (err) {
         console.error(err);
-        alert('Image upload failed');
+        alert('Image upload failed (admin not signed in, or rules blocked it). See console.');
       } finally {
         setUploadingBlockIdx(null);
       }
@@ -589,6 +714,13 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
       // block gets stripped below and the image silently disappears.
       if (uploadingBlockIdx !== null) {
         alert('Please wait for the image upload to finish.');
+        return;
+      }
+      // For a brand-new private project we require the password to be set
+      // here (the Cloud Function refuses to create the doc without one).
+      const isNewPrivate = isPrivate && !initialData?.isPrivate;
+      if (isNewPrivate && !password.trim()) {
+        alert('Please set a password for the private story.');
         return;
       }
       // Strip empty blocks before saving (a text block with no content, or
@@ -607,7 +739,16 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
           (b.type === 'image' && (b.url || '').trim())
         ),
       };
-      onSave({ ...formData, story: cleanedStory });
+      onSave({
+        ...formData,
+        story: cleanedStory,
+        isPrivate,
+        privateStoryId,
+        // Only send the password if the user actually typed one. The Cloud
+        // Function treats an empty/absent password as "keep the existing
+        // hash" on update.
+        password: password.trim() ? password : undefined,
+      });
     };
 
     return (
@@ -655,6 +796,49 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
 
                 {storyExpanded && (
                   <div className="mt-4">
+                    {/* Privacy toggle + password field */}
+                    <div className="mb-4 p-3 bg-black/40 border border-neutral-800 rounded-lg">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Lock size={13} className={isPrivate ? "text-amber-400" : "text-neutral-500"} />
+                          <span className="text-xs font-bold uppercase tracking-wider text-white">
+                            Private (password-protected)
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsPrivate(v => !v)}
+                          className={`w-10 h-5 rounded-full p-0.5 transition-colors flex items-center ${isPrivate ? 'bg-amber-500' : 'bg-neutral-700'}`}
+                          aria-label="Toggle private mode"
+                        >
+                          <div className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform ${isPrivate ? 'translate-x-5' : 'translate-x-0'}`} />
+                        </button>
+                      </div>
+                      {isPrivate && (
+                        <div className="mt-3">
+                          <label className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1 block">
+                            {initialData?.isPrivate ? 'New password (leave blank to keep current)' : 'Password (required)'}
+                          </label>
+                          <input
+                            type="password"
+                            value={password}
+                            onChange={e => setPassword(e.target.value)}
+                            placeholder={initialData?.isPrivate ? '••••••••' : 'Set a password'}
+                            className="w-full bg-black border border-neutral-700 rounded p-2 text-white text-sm tracking-widest"
+                            autoComplete="new-password"
+                          />
+                          <p className="text-[10px] text-neutral-600 mt-2 leading-relaxed">
+                            Story content and images will be stored server-side and accessible only to readers who enter this password.
+                          </p>
+                        </div>
+                      )}
+                      {!isPrivate && initialData?.isPrivate && (
+                        <p className="text-[10px] text-amber-500/80 mt-2 leading-relaxed">
+                          ⚠ Turning private off will remove the locked story and make any future story content publicly visible.
+                        </p>
+                      )}
+                    </div>
+
                     {/* Language tabs */}
                     <div className="flex gap-1 mb-3 bg-black/40 p-1 rounded">
                       {['en', 'cn', 'th'].map(l => {
@@ -1369,7 +1553,7 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
   );
 };
 
-const ProjectRow = ({ projectTitle, photos, onImageClick, storyBlocks, readStoryLabel, onStoryClick }) => {
+const ProjectRow = ({ projectTitle, photos, onImageClick, storyBlocks, readStoryLabel, onStoryClick, isPrivateStory }) => {
   const [showOverlay, setShowOverlay] = useState(false);
   const hoverTimeoutRef = useRef(null);
   const scrollContainerRef = useRef(null);
@@ -1424,8 +1608,9 @@ const ProjectRow = ({ projectTitle, photos, onImageClick, storyBlocks, readStory
         {hasStory && (
           <button
             onClick={onStoryClick}
-            className="mt-1.5 inline-flex items-center gap-1 text-[10px] tracking-[0.2em] uppercase text-white/40 active:text-white transition-colors font-sans"
+            className={`mt-1.5 inline-flex items-center gap-1 text-[10px] tracking-[0.2em] uppercase active:text-white transition-colors font-sans ${isPrivateStory ? 'text-amber-400/80' : 'text-white/40'}`}
           >
+            {isPrivateStory && <Lock size={10} />}
             {readStoryLabel} <span aria-hidden="true">→</span>
           </button>
         )}
@@ -1439,8 +1624,9 @@ const ProjectRow = ({ projectTitle, photos, onImageClick, storyBlocks, readStory
       {hasStory && (
         <button
           onClick={onStoryClick}
-          className="hidden md:inline-flex absolute top-0 right-4 items-center gap-1 text-[10px] tracking-[0.25em] uppercase text-white/40 hover:text-white transition-colors font-sans z-20"
+          className={`hidden md:inline-flex absolute top-0 right-4 items-center gap-1 text-[10px] tracking-[0.25em] uppercase hover:text-white transition-colors font-sans z-20 ${isPrivateStory ? 'text-amber-400/70' : 'text-white/40'}`}
         >
+          {isPrivateStory && <Lock size={10} />}
           {readStoryLabel} <span aria-hidden="true">→</span>
         </button>
       )}
@@ -1473,6 +1659,16 @@ const ProjectRow = ({ projectTitle, photos, onImageClick, storyBlocks, readStory
 
 const WorksPage = ({ photos, profile, ui, onImageClick, lang }) => {
   const [activeStory, setActiveStory] = useState(null);
+  // Per-session cache of unlocked private stories: { [projectId]: { story } }.
+  // Once a reader unlocks a story, we keep the decrypted content here so
+  // re-opening it (or switching languages) doesn't re-prompt for the password.
+  const [unlockedStories, setUnlockedStories] = useState({});
+  // The lock prompt's local state: which project's password is being asked
+  // for, plus busy/error flags for the unlockStory call.
+  const [pendingUnlock, setPendingUnlock] = useState(null); // {projectId, title}
+  const [unlocking, setUnlocking] = useState(false);
+  const [unlockError, setUnlockError] = useState('');
+
   const uiText = ui || UI_TEXT.en;
 
   const groupedByYearAndProject = photos.reduce((acc, photo) => {
@@ -1484,7 +1680,7 @@ const WorksPage = ({ photos, profile, ui, onImageClick, lang }) => {
     return acc;
   }, {});
   const sortedYears = Object.keys(groupedByYearAndProject).sort((a, b) => b - a);
-  
+
   const getSortedProjects = (year) => {
       const projs = Object.keys(groupedByYearAndProject[year]);
       return projs.sort((a, b) => {
@@ -1504,6 +1700,81 @@ const WorksPage = ({ photos, profile, ui, onImageClick, lang }) => {
     return blocks;
   };
 
+  // Did the admin author a story for this project in any language?
+  // Private projects have no public projectStory, so we infer presence from
+  // the isPrivateStory flag instead.
+  const projectHasStory = (firstPhoto) => {
+    if (firstPhoto?.isPrivateStory) return true;
+    const s = firstPhoto?.projectStory;
+    if (!s) return false;
+    return ['en', 'cn', 'th'].some(l => Array.isArray(s[l]) && s[l].length > 0);
+  };
+
+  // Triggered when the user clicks "Read story" on the works page.
+  // Public projects → open immediately with their block array.
+  // Private projects → check cache, else prompt for password.
+  const handleStoryClick = (firstPhoto, displayTitle) => {
+    if (firstPhoto?.isPrivateStory) {
+      const projectId = firstPhoto.privateStoryId;
+      if (!projectId) {
+        alert('This story is marked private but has no story ID — please re-save it from the admin panel.');
+        return;
+      }
+      // Already unlocked this session? Just open it.
+      const cached = unlockedStories[projectId];
+      if (cached) {
+        const blocks = cached.story?.[lang] || [];
+        setActiveStory({ title: displayTitle, blocks, isPrivate: true });
+        return;
+      }
+      // Otherwise, ask for the password.
+      setUnlockError('');
+      setPendingUnlock({ projectId, title: displayTitle });
+      return;
+    }
+    // Public path — same as before.
+    const blocks = getStoryForLang(firstPhoto);
+    setActiveStory({ title: displayTitle, blocks: blocks || [] });
+  };
+
+  // Called by the PasswordPromptModal on submit. Calls the unlockStory Cloud
+  // Function, signs in with the returned custom token (so Firestore allows
+  // the read), fetches the story doc, caches it, and opens the reader modal.
+  const handleUnlockSubmit = async (password) => {
+    if (!pendingUnlock) return;
+    setUnlocking(true);
+    setUnlockError('');
+    try {
+      const { token } = await callFn('unlockStory', {
+        appId,
+        projectId: pendingUnlock.projectId,
+        password,
+      });
+      await signInWithCustomToken(auth, token);
+      const snap = await getDoc(getPrivateStoryDoc(pendingUnlock.projectId));
+      if (!snap.exists()) throw new Error('Story not found.');
+      const story = snap.data()?.story || { en: [], cn: [], th: [] };
+
+      const projectId = pendingUnlock.projectId;
+      const title = pendingUnlock.title;
+      setUnlockedStories(prev => ({ ...prev, [projectId]: { story } }));
+      setPendingUnlock(null);
+      setActiveStory({ title, blocks: story[lang] || [], isPrivate: true });
+    } catch (e) {
+      console.error('unlockStory failed:', e);
+      const code = e?.code || '';
+      if (code.includes('permission-denied') || code.includes('unauthenticated')) {
+        setUnlockError('Wrong password.');
+      } else if (code.includes('not-found')) {
+        setUnlockError('Story not found.');
+      } else {
+        setUnlockError('Could not unlock. Please try again.');
+      }
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-neutral-950 text-white animate-fade-in-up">
       <div className="pt-28 md:pt-32 pb-32 px-4 md:px-12 container mx-auto max-w-[1920px]">
@@ -1518,7 +1789,11 @@ const WorksPage = ({ photos, profile, ui, onImageClick, lang }) => {
                 const projectPhotos = groupedByYearAndProject[year][projectKey].sort((a,b) => (a.order || 0) - (b.order || 0));
                 const firstPhoto = projectPhotos[0];
                 const displayTitle = firstPhoto.projectTitles?.[lang] || projectKey;
-                const storyBlocks = getStoryForLang(firstPhoto);
+                const hasStory = projectHasStory(firstPhoto);
+                const isPrivateStory = !!firstPhoto?.isPrivateStory;
+                // For the desktop button to show, we just need `hasStory`.
+                // The actual content is fetched on demand when private.
+                const storyBlocks = hasStory ? (getStoryForLang(firstPhoto) || []) : null;
 
                 return (
                   <ProjectRow
@@ -1526,9 +1801,10 @@ const WorksPage = ({ photos, profile, ui, onImageClick, lang }) => {
                     projectTitle={displayTitle}
                     photos={projectPhotos}
                     onImageClick={onImageClick}
-                    storyBlocks={storyBlocks}
+                    storyBlocks={hasStory ? (storyBlocks?.length ? storyBlocks : [{ /* sentinel */ }]) : null}
+                    isPrivateStory={isPrivateStory}
                     readStoryLabel={uiText.readStory}
-                    onStoryClick={() => setActiveStory({ title: displayTitle, blocks: storyBlocks })}
+                    onStoryClick={() => handleStoryClick(firstPhoto, displayTitle)}
                   />
                 );
               })}
@@ -1546,6 +1822,15 @@ const WorksPage = ({ photos, profile, ui, onImageClick, lang }) => {
         onClose={() => setActiveStory(null)}
         projectTitle={activeStory?.title || ''}
         blocks={activeStory?.blocks || []}
+      />
+
+      <PasswordPromptModal
+        isOpen={!!pendingUnlock}
+        projectTitle={pendingUnlock?.title || ''}
+        onClose={() => { if (!unlocking) setPendingUnlock(null); }}
+        onSubmit={handleUnlockSubmit}
+        busy={unlocking}
+        error={unlockError}
       />
     </div>
   );
@@ -1659,19 +1944,37 @@ const PhotosManager = ({ photos, onAddPhoto, onDeletePhoto, onBatchUpdate }) => 
       }
   };
   
-  const openEditProject = (project, year) => {
+  const openEditProject = async (project, year) => {
      const projectPhotos = photos.filter(p => p.year === year && p.project === project);
      const firstPhoto = projectPhotos[0];
      const titles = firstPhoto?.projectTitles || { en: project, cn: '', th: '' };
-     // Pull existing story (if any). We use the first photo as the source of truth —
-     // the story is replicated across all photos in a project so they stay in sync.
-     const existingStory = firstPhoto?.projectStory || { en: [], cn: [], th: [] };
+
+     // Resolve story source:
+     // - Private project: fetch the locked story doc (admin token allows read).
+     // - Public project: use the projectStory field on the first photo doc.
+     const isPrivate = !!firstPhoto?.isPrivateStory;
+     const privateStoryId = firstPhoto?.privateStoryId || null;
+     let existingStory = firstPhoto?.projectStory || { en: [], cn: [], th: [] };
+
+     if (isPrivate && privateStoryId) {
+       try {
+         const snap = await getDoc(getPrivateStoryDoc(privateStoryId));
+         if (snap.exists() && snap.data()?.story) {
+           existingStory = snap.data().story;
+         }
+       } catch (e) {
+         console.warn('Could not load private story (admin not signed in?):', e);
+       }
+     }
+
      setEditingProjectData({
          oldYear: year,
          oldProject: project,
          en: titles.en || project,
          cn: titles.cn || '',
          th: titles.th || '',
+         isPrivate,
+         privateStoryId,
          story: {
              en: Array.isArray(existingStory.en) ? existingStory.en : [],
              cn: Array.isArray(existingStory.cn) ? existingStory.cn : [],
@@ -1683,22 +1986,62 @@ const PhotosManager = ({ photos, onAddPhoto, onDeletePhoto, onBatchUpdate }) => 
   const handleSaveProjectEdit = async (newData) => {
       if(!editingProjectData) return;
       setUploading(true);
-      const { oldYear, oldProject } = editingProjectData;
-      const toUpdate = photos.filter(p => p.year === oldYear && p.project === oldProject);
+      try {
+        const { oldYear, oldProject, isPrivate: wasPrivate, privateStoryId: oldPrivateId } = editingProjectData;
+        const toUpdate = photos.filter(p => p.year === oldYear && p.project === oldProject);
 
-      // newData shape: { en, cn, th, story: { en: [...], cn: [...], th: [...] } }
-      const { story, ...titles } = newData;
+        const { story, isPrivate, privateStoryId, password, ...titles } = newData;
 
-      const updates = toUpdate.map(p => ({
-          id: p.id,
-          project: titles.en,
-          projectTitles: titles,
-          projectStory: story || { en: [], cn: [], th: [] }
-      }));
-
-      await onBatchUpdate(updates);
-      setUploading(false);
-      setEditingProjectData(null);
+        if (isPrivate) {
+          // --- Save path: PRIVATE ---
+          // 1. Push story content + (optional new) password to the locked
+          //    Firestore doc via the Cloud Function. The function hashes the
+          //    password with bcrypt and writes under admin SDK privileges.
+          const pid = privateStoryId || generateProjectId();
+          await callFn('setPrivateStory', {
+            appId,
+            projectId: pid,
+            story,
+            password, // undefined => keep existing hash
+          });
+          // 2. Update every photo doc in the project: flip the flag, store
+          //    the project id, and strip any leftover public story.
+          const updates = toUpdate.map(p => ({
+              id: p.id,
+              project: titles.en,
+              projectTitles: titles,
+              isPrivateStory: true,
+              privateStoryId: pid,
+              projectStory: { en: [], cn: [], th: [] }, // clear public copy
+          }));
+          await onBatchUpdate(updates);
+        } else {
+          // --- Save path: PUBLIC ---
+          // If the project was private before, clean up the locked doc first.
+          if (wasPrivate && oldPrivateId) {
+            try {
+              await callFn('clearPrivateStory', { appId, projectId: oldPrivateId });
+            } catch (e) {
+              console.warn('clearPrivateStory failed (continuing):', e);
+            }
+          }
+          const updates = toUpdate.map(p => ({
+              id: p.id,
+              project: titles.en,
+              projectTitles: titles,
+              projectStory: story || { en: [], cn: [], th: [] },
+              isPrivateStory: false,
+              privateStoryId: null,
+          }));
+          await onBatchUpdate(updates);
+        }
+      } catch (e) {
+        console.error('Save project edit failed:', e);
+        alert('Save failed: ' + (e?.message || e));
+      } finally {
+        setUploading(false);
+        setEditingProjectData(null);
+      }
   };
 
   const moveProject = (year, proj, dir) => {
@@ -2426,14 +2769,33 @@ const AppContent = () => {
     return () => { unsubPhotos(); unsubSettings(); };
   }, [user]); // Re-subscribe if user status changes (e.g. becomes admin)
 
-  const handleLoginAttempt = (pass) => { 
-    const correctPass = settings.profile?.adminPasscode || APP_CONFIG.adminPasscode;
-    if (pass === correctPass) { 
-        setShowLogin(false); 
-        setViewMode("admin"); 
-    } else { 
-        alert("Wrong Passcode"); 
-    } 
+  // Admin login is now validated server-side by the `adminLogin` Cloud
+  // Function. On success it returns a custom token whose `admin: true` claim
+  // is what Firestore/Storage rules check — the passcode in this file is no
+  // longer authoritative. (Set the real passcode via:
+  //   firebase functions:secrets:set ADMIN_PASSCODE )
+  const handleLoginAttempt = async (pass) => {
+    try {
+      const { token } = await callFn('adminLogin', { passcode: pass });
+      await signInWithCustomToken(auth, token);
+      setShowLogin(false);
+      setViewMode("admin");
+    } catch (e) {
+      console.error("Admin login failed:", e);
+      alert("Wrong Passcode");
+    }
+  };
+
+  // Drop the admin session and return the client to anonymous (public) auth
+  // so listeners that depend on a user keep firing.
+  const handleAdminLogout = async () => {
+    setViewMode("public");
+    try {
+      await signOut(auth);
+      await signInAnonymously(auth);
+    } catch (e) {
+      console.warn("Sign-out cleanup failed:", e);
+    }
   };
   const handleAddPhoto = async (d) => await addDoc(getPublicCollection("photos"), { ...d, createdAt: serverTimestamp() });
   const handleDeletePhoto = async (id) => await deleteDoc(getPublicDoc("photos", id));
@@ -2467,7 +2829,7 @@ const AppContent = () => {
 
   return (
     <>
-      {viewMode === "public" ? <MainView photos={photos} settings={settings} onLoginClick={() => setShowLogin(true)} isOffline={isOffline} /> : <AdminDashboard photos={photos} settings={settings} onLogout={() => setViewMode("public")} onAddPhoto={handleAddPhoto} onDeletePhoto={handleDeletePhoto} onUpdateSettings={handleUpdateSettings} onBatchUpdate={handleBatchUpdate} />}
+      {viewMode === "public" ? <MainView photos={photos} settings={settings} onLoginClick={() => setShowLogin(true)} isOffline={isOffline} /> : <AdminDashboard photos={photos} settings={settings} onLogout={handleAdminLogout} onAddPhoto={handleAddPhoto} onDeletePhoto={handleDeletePhoto} onUpdateSettings={handleUpdateSettings} onBatchUpdate={handleBatchUpdate} />}
       <LoginModal isOpen={showLogin} onClose={() => setShowLogin(false)} onLogin={handleLoginAttempt} />
     </>
   );
