@@ -460,6 +460,45 @@ const StoryImageBlock = ({ block }) => {
   );
 };
 
+// Story video renderer. Mirrors StoryImageBlock's framing but plays a video
+// instead. The block's saved width/height (captured at upload time in the
+// editor) decides between a 16:9 landscape frame and 9:16 vertical frame —
+// when natural dimensions aren't recorded yet, we fall back to 16:9 since
+// landscape is far more common for travel videos.
+//
+// `preload="metadata"` keeps cost in check: the video doesn't actually
+// stream its bytes until the user hits play. Without this, every page view
+// would silently download the full clip.
+const StoryVideoBlock = ({ block }) => {
+  const w = block.width || 0;
+  const h = block.height || 0;
+  const aspectRatio = w && h && h > w ? "9 / 16" : "16 / 9";
+
+  return (
+    // Mirrors StoryImageBlock's outer-margin behavior: image (or video) is
+    // narrower than text on mobile, breaks out wider on desktop.
+    <figure className="my-8 md:my-16 mx-8 sm:mx-12 md:-mx-16 lg:-mx-32 xl:-mx-48">
+      <div
+        className="w-full bg-neutral-900 overflow-hidden"
+        style={{ aspectRatio }}
+      >
+        <video
+          src={block.url}
+          controls
+          playsInline
+          preload="metadata"
+          className="w-full h-full object-cover block"
+        />
+      </div>
+      {block.caption && (
+        <figcaption className="font-sans text-neutral-500 text-[11px] md:text-xs leading-relaxed mt-3 px-0 md:px-16 lg:px-32 xl:px-48 italic">
+          {block.caption}
+        </figcaption>
+      )}
+    </figure>
+  );
+};
+
 const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
   useEffect(() => {
     if (!isOpen) return;
@@ -540,6 +579,9 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
           }
           if (block.type === "image") {
             return <StoryImageBlock key={idx} block={block} />;
+          }
+          if (block.type === "video") {
+            return <StoryVideoBlock key={idx} block={block} />;
           }
           return null;
         })}
@@ -718,6 +760,11 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
       setStory(prev => ({ ...prev, [lang]: [...(prev[lang] || []), { type: 'image', url: '', caption: '' }] }));
     };
 
+    const addVideoBlock = () => {
+      const lang = activeStoryTab;
+      setStory(prev => ({ ...prev, [lang]: [...(prev[lang] || []), { type: 'video', url: '', caption: '' }] }));
+    };
+
     const updateBlock = (idx, patch) => {
       const lang = activeStoryTab;
       setStory(prev => ({
@@ -789,11 +836,103 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
       }
     };
 
+    // Maximum video file size accepted by the editor. Anything larger triggers
+    // an alert and the upload is refused — the user is asked to record/export
+    // at a lower resolution from their phone (Settings → Camera → 720p HD).
+    const MAX_VIDEO_BYTES = 50 * 1024 * 1024; // 50 MB
+
+    // Probe a video file (without uploading) to get its duration + intrinsic
+    // dimensions. We use this for two things:
+    //   1. Showing the user "00:42 • 18.3 MB" before upload (helpful UX),
+    //   2. Storing width/height on the block so the public reader can pick
+    //      between a 16:9 frame for landscape clips and 9:16 for vertical.
+    const probeVideoMeta = (file) => new Promise((resolve) => {
+      try {
+        const v = document.createElement('video');
+        v.preload = 'metadata';
+        v.muted = true;
+        v.playsInline = true;
+        const objUrl = URL.createObjectURL(file);
+        const cleanup = () => { try { URL.revokeObjectURL(objUrl); } catch (_) {} };
+        v.onloadedmetadata = () => {
+          const meta = {
+            durationSec: Math.round(v.duration || 0),
+            width: v.videoWidth || 0,
+            height: v.videoHeight || 0,
+            sizeBytes: file.size,
+          };
+          cleanup();
+          resolve(meta);
+        };
+        v.onerror = () => { cleanup(); resolve(null); };
+        v.src = objUrl;
+      } catch (_) {
+        resolve(null);
+      }
+    });
+
+    const handleVideoUpload = async (idx, file) => {
+      if (!file) return;
+      const lang = activeStoryTab;
+
+      // Hard size cap. Phone clips that exceed this almost always do so
+      // because they were recorded at 4K or for longer than ~60 seconds.
+      if (file.size > MAX_VIDEO_BYTES) {
+        const mb = (file.size / 1024 / 1024).toFixed(1);
+        alert(
+          `Video is ${mb} MB — over the 50 MB limit.\n\n` +
+          `Tip: on iPhone, Settings → Camera → Record Video → "720p HD at 30 fps" ` +
+          `produces ~5 MB per 30 seconds, well within range.`
+        );
+        return;
+      }
+
+      setUploadingBlockIdx(idx);
+      try {
+        // Read metadata BEFORE uploading so we can warn early on weird files
+        // and capture width/height for aspect-ratio rendering on the public
+        // side. If the probe fails (unsupported codec, etc.), we still allow
+        // the upload — the public player may still be able to play it.
+        const meta = await probeVideoMeta(file);
+
+        let path;
+        if (isPrivate) {
+          let pid = privateStoryId;
+          if (!pid) {
+            pid = generateProjectId();
+            setPrivateStoryId(pid);
+          }
+          path = `private/${pid}/${lang}/video_${Date.now()}_${file.name}`;
+        } else {
+          const safeProject = (formData.en || initialData?.oldProject || 'project').trim() || 'project';
+          path = `${storagePathPrefix || 'stories'}/${safeProject}/${lang}/video_${Date.now()}_${file.name}`;
+        }
+
+        const url = await uploadFileToStorage(file, path);
+        setStory(prev => ({
+          ...prev,
+          [lang]: (prev[lang] || []).map((b, i) => i === idx ? {
+            ...b,
+            url,
+            width: meta?.width || b.width || 0,
+            height: meta?.height || b.height || 0,
+            durationSec: meta?.durationSec || b.durationSec || 0,
+            sizeBytes: meta?.sizeBytes || file.size,
+          } : b)
+        }));
+      } catch (err) {
+        console.error(err);
+        alert('Video upload failed (admin not signed in, or rules blocked it). See console.');
+      } finally {
+        setUploadingBlockIdx(null);
+      }
+    };
+
     const handleSave = () => {
       // Block save while an upload is mid-flight; otherwise the empty-url
       // block gets stripped below and the image silently disappears.
       if (uploadingBlockIdx !== null) {
-        alert('Please wait for the image upload to finish.');
+        alert('Please wait for the upload to finish.');
         return;
       }
       // For a brand-new private project we require the password to be set
@@ -803,21 +942,16 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
         alert('Please set a password for the private story.');
         return;
       }
-      // Strip empty blocks before saving (a text block with no content, or
-      // an image block with no url, is just noise on the public side).
+      // Strip empty blocks before saving (a text/image/video block missing
+      // its actual content is just noise on the public side).
+      const keep = (b) =>
+        (b.type === 'text'  && (b.content || '').trim()) ||
+        (b.type === 'image' && (b.url || '').trim()) ||
+        (b.type === 'video' && (b.url || '').trim());
       const cleanedStory = {
-        en: (story.en || []).filter(b =>
-          (b.type === 'text' && (b.content || '').trim()) ||
-          (b.type === 'image' && (b.url || '').trim())
-        ),
-        cn: (story.cn || []).filter(b =>
-          (b.type === 'text' && (b.content || '').trim()) ||
-          (b.type === 'image' && (b.url || '').trim())
-        ),
-        th: (story.th || []).filter(b =>
-          (b.type === 'text' && (b.content || '').trim()) ||
-          (b.type === 'image' && (b.url || '').trim())
-        ),
+        en: (story.en || []).filter(keep),
+        cn: (story.cn || []).filter(keep),
+        th: (story.th || []).filter(keep),
       };
       onSave({
         ...formData,
@@ -963,8 +1097,8 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
                           {/* Block toolbar */}
                           <div className="flex items-center justify-between mb-2">
                             <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-neutral-500 font-bold">
-                              {block.type === 'text' ? <Type size={11} /> : <ImageIcon size={11} />}
-                              <span>{block.type === 'text' ? 'Paragraph' : 'Image'}</span>
+                              {block.type === 'text' ? <Type size={11} /> : block.type === 'video' ? <Play size={11} /> : <ImageIcon size={11} />}
+                              <span>{block.type === 'text' ? 'Paragraph' : block.type === 'video' ? 'Video' : 'Image'}</span>
                               <span className="text-neutral-700">#{idx + 1}</span>
                             </div>
                             <div className="flex items-center gap-1">
@@ -1054,6 +1188,76 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
                               />
                             </div>
                           )}
+
+                          {block.type === 'video' && (
+                            <div className="space-y-2">
+                              {block.url ? (
+                                <div className="relative">
+                                  <video
+                                    src={block.url}
+                                    controls
+                                    playsInline
+                                    preload="metadata"
+                                    className="w-full max-h-44 object-contain bg-neutral-950 rounded"
+                                  />
+                                  <label className="absolute top-2 right-2 px-2 py-1 bg-black/70 hover:bg-black text-white text-[10px] uppercase tracking-wider rounded cursor-pointer">
+                                    Replace
+                                    <input
+                                      type="file"
+                                      accept="video/*"
+                                      className="hidden"
+                                      onChange={e => handleVideoUpload(idx, e.target.files[0])}
+                                    />
+                                  </label>
+                                  {/* Metadata strip — file size / duration / dimensions */}
+                                  {(block.sizeBytes || block.durationSec || block.width) && (
+                                    <div className="mt-1 text-[10px] text-neutral-500 font-mono tracking-wider flex flex-wrap gap-x-3">
+                                      {block.durationSec ? (
+                                        <span>
+                                          {Math.floor(block.durationSec / 60)}:
+                                          {String(block.durationSec % 60).padStart(2, '0')}
+                                        </span>
+                                      ) : null}
+                                      {block.sizeBytes ? (
+                                        <span>{(block.sizeBytes / 1024 / 1024).toFixed(1)} MB</span>
+                                      ) : null}
+                                      {block.width && block.height ? (
+                                        <span>{block.width}×{block.height}</span>
+                                      ) : null}
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <label className={`flex flex-col items-center justify-center py-6 border border-dashed border-neutral-700 rounded cursor-pointer hover:border-neutral-500 hover:bg-black/30 transition-colors ${uploadingBlockIdx === idx ? 'opacity-50 pointer-events-none' : ''}`}>
+                                  {uploadingBlockIdx === idx ? (
+                                    <>
+                                      <Loader2 size={20} className="text-neutral-500 animate-spin mb-2" />
+                                      <span className="text-xs text-neutral-500">Uploading…</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <UploadCloud size={20} className="text-neutral-500 mb-2" />
+                                      <span className="text-xs text-neutral-500">Click to upload video</span>
+                                      <span className="text-[10px] text-neutral-600 mt-1">Max 50 MB · MP4 / MOV / WebM</span>
+                                    </>
+                                  )}
+                                  <input
+                                    type="file"
+                                    accept="video/*"
+                                    className="hidden"
+                                    onChange={e => handleVideoUpload(idx, e.target.files[0])}
+                                  />
+                                </label>
+                              )}
+                              <input
+                                type="text"
+                                value={block.caption || ''}
+                                onChange={e => updateBlock(idx, { caption: e.target.value })}
+                                placeholder="Caption (optional)"
+                                className="w-full bg-black border border-neutral-700 rounded p-2 text-neutral-400 text-xs italic"
+                              />
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -1071,6 +1275,12 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
                         className="flex-1 flex items-center justify-center gap-2 py-2 bg-black border border-neutral-700 rounded text-xs uppercase tracking-wider text-neutral-300 hover:border-neutral-500 hover:text-white transition-colors"
                       >
                         <Plus size={13} /> Image
+                      </button>
+                      <button
+                        onClick={addVideoBlock}
+                        className="flex-1 flex items-center justify-center gap-2 py-2 bg-black border border-neutral-700 rounded text-xs uppercase tracking-wider text-neutral-300 hover:border-neutral-500 hover:text-white transition-colors"
+                      >
+                        <Plus size={13} /> Video
                       </button>
                     </div>
 
