@@ -429,7 +429,13 @@ const StoryImageBlock = ({ block }) => {
   const aspectRatio = orient === "portrait" ? "3 / 4" : "4 / 3";
 
   return (
-    <figure className="my-12 md:my-16 -mx-6 md:-mx-16 lg:-mx-32 xl:-mx-48">
+    // Mobile: figure sits INSIDE the text column with a positive margin, so
+    // the image ends up narrower than the surrounding paragraphs — keeps
+    // photos from dominating a phone screen.
+    // Desktop (md+): figure breaks OUT of the text column via negative
+    // margins, so a hero photo can be wider than the body text — magazine
+    // layout.
+    <figure className="my-8 md:my-16 mx-8 sm:mx-12 md:-mx-16 lg:-mx-32 xl:-mx-48">
       <div
         className="w-full bg-neutral-900 overflow-hidden"
         style={{ aspectRatio }}
@@ -443,7 +449,10 @@ const StoryImageBlock = ({ block }) => {
         />
       </div>
       {block.caption && (
-        <figcaption className="font-sans text-neutral-500 text-[11px] md:text-xs leading-relaxed mt-3 px-6 md:px-16 lg:px-32 xl:px-48 italic">
+        // On mobile the caption fills the figure (which is narrower than text).
+        // On md+ we add padding so the caption ends up aligned with the text
+        // column even though the image extends past it.
+        <figcaption className="font-sans text-neutral-500 text-[11px] md:text-xs leading-relaxed mt-3 px-0 md:px-16 lg:px-32 xl:px-48 italic">
           {block.caption}
         </figcaption>
       )}
@@ -1181,14 +1190,22 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
 
   useEffect(() => { onIndexChange && onIndexChange(currentIndex); }, [currentIndex, onIndexChange]);
 
-  // Native touch gesture listeners.
-  // React's onTouchMove is internally passive in modern React, so
-  // `e.preventDefault()` is a no-op there and the browser sometimes still
-  // wins the gesture. We bypass that by attaching listeners directly.
+  // Gesture listeners via Pointer Events.
+  //
+  // We tried Touch Events first but iOS Chrome (WebKit) was flaky — likely
+  // because the slide divs above us have onClick handlers, and WebKit was
+  // routing the gesture through the click pipeline before our touchmove ran.
+  // Pointer Events:
+  //   - unify touch + mouse + pen,
+  //   - participate in pointer capture so once a swipe starts on this
+  //     element, every subsequent move/up belongs to us,
+  //   - are non-passive on cancelable elements, so preventDefault works.
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
 
+    let active = false;
+    let activeId = null;
     let startX = 0;
     let startY = 0;
     let moved = false;
@@ -1204,31 +1221,44 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
       startAutoRotate();
     };
 
-    const handleStart = (e) => {
-      if (e.touches.length !== 1) return;
-      const t = e.touches[0];
-      startX = t.clientX;
-      startY = t.clientY;
+    const onDown = (e) => {
+      if (active) return;
+      // Ignore secondary mouse buttons; allow primary touch/pen/left-click.
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      active = true;
+      activeId = e.pointerId;
+      startX = e.clientX;
+      startY = e.clientY;
       moved = false;
+      // Lock the gesture to this element so we keep getting move/up even if
+      // the finger drifts to a child or briefly off-element.
+      try { el.setPointerCapture(e.pointerId); } catch (_) {}
     };
-    const handleMove = (e) => {
-      if (e.touches.length !== 1) return;
-      const t = e.touches[0];
-      if (Math.abs(t.clientX - startX) > 8 || Math.abs(t.clientY - startY) > 8) {
+
+    const onMove = (e) => {
+      if (!active || e.pointerId !== activeId) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
         moved = true;
-        // Block native pull-to-refresh / overscroll bouncing on actual drags.
-        e.preventDefault();
+        if (e.cancelable) e.preventDefault();
       }
     };
-    const handleEnd = (e) => {
-      if (!moved) return;
-      const t = e.changedTouches[0];
-      const dx = t.clientX - startX;
-      const dy = t.clientY - startY;
+
+    const finish = (e) => {
+      if (!active || e.pointerId !== activeId) return;
+      const wasMoved = moved;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      active = false;
+      activeId = null;
+      moved = false;
+      try { el.releasePointerCapture(e.pointerId); } catch (_) {}
+
+      if (!wasMoved) return; // it was a tap — let the click handler run
       const absDx = Math.abs(dx);
       const absDy = Math.abs(dy);
-      if (Math.max(absDx, absDy) < 30) return; // too small a swipe
-
+      if (Math.max(absDx, absDy) < 30) return;
       if (absDx > absDy) {
         advance(dx < 0 ? "next" : "prev");
       } else {
@@ -1236,14 +1266,16 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
       }
     };
 
-    el.addEventListener("touchstart", handleStart, { passive: false });
-    el.addEventListener("touchmove", handleMove, { passive: false });
-    el.addEventListener("touchend", handleEnd, { passive: false });
+    el.addEventListener("pointerdown", onDown);
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", finish);
+    el.addEventListener("pointercancel", finish);
 
     return () => {
-      el.removeEventListener("touchstart", handleStart);
-      el.removeEventListener("touchmove", handleMove);
-      el.removeEventListener("touchend", handleEnd);
+      el.removeEventListener("pointerdown", onDown);
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", finish);
+      el.removeEventListener("pointercancel", finish);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1261,7 +1293,15 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
     <div
       ref={rootRef}
       className="absolute inset-0 w-full h-full bg-black overflow-hidden z-0"
-      style={{ touchAction: "none", overscrollBehavior: "none" }}
+      style={{
+        touchAction: "none",
+        overscrollBehavior: "none",
+        // Stop the browser from highlighting/selecting text mid-swipe on iOS,
+        // which can otherwise hijack a horizontal drag into text selection.
+        userSelect: "none",
+        WebkitUserSelect: "none",
+        WebkitTouchCallout: "none",
+      }}
     >
       {slides.map((slide, index) => {
         const isActive = index === currentIndex;
