@@ -1190,21 +1190,20 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
 
   useEffect(() => { onIndexChange && onIndexChange(currentIndex); }, [currentIndex, onIndexChange]);
 
-  // Gesture listeners via Pointer Events.
+  // Gesture listeners — Pointer Events + Touch Events together.
   //
-  // We tried Touch Events first but iOS Chrome (WebKit) was flaky — likely
-  // because the slide divs above us have onClick handlers, and WebKit was
-  // routing the gesture through the click pipeline before our touchmove ran.
-  // Pointer Events:
-  //   - unify touch + mouse + pen,
-  //   - participate in pointer capture so once a swipe starts on this
-  //     element, every subsequent move/up belongs to us,
-  //   - are non-passive on cancelable elements, so preventDefault works.
+  // We've seen iOS Chrome (WebKit) silently drop pointer events in some
+  // pages where children have click handlers, and at other times drop
+  // touchmove events when `touch-action: none` is applied. We register
+  // BOTH families and use a single shared `active` flag plus a per-source
+  // tag (`source`) so whichever one fires first owns the gesture and the
+  // other is ignored until release.
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
 
     let active = false;
+    let source = null; // 'pointer' | 'touch'
     let activeId = null;
     let startX = 0;
     let startY = 0;
@@ -1221,61 +1220,87 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
       startAutoRotate();
     };
 
-    const onDown = (e) => {
-      if (active) return;
-      // Ignore secondary mouse buttons; allow primary touch/pen/left-click.
-      if (e.pointerType === "mouse" && e.button !== 0) return;
-      active = true;
-      activeId = e.pointerId;
-      startX = e.clientX;
-      startY = e.clientY;
-      moved = false;
-      // Lock the gesture to this element so we keep getting move/up even if
-      // the finger drifts to a child or briefly off-element.
-      try { el.setPointerCapture(e.pointerId); } catch (_) {}
+    const commit = (dx, dy) => {
+      const absDx = Math.abs(dx);
+      const absDy = Math.abs(dy);
+      if (Math.max(absDx, absDy) < 30) return;
+      if (absDx > absDy) advance(dx < 0 ? "next" : "prev");
+      else advance(dy < 0 ? "next" : "prev");
     };
 
-    const onMove = (e) => {
-      if (!active || e.pointerId !== activeId) return;
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-      if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+    // ---- Pointer Events ----
+    const onPointerDown = (e) => {
+      if (active) return;
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      active = true; source = "pointer"; activeId = e.pointerId;
+      startX = e.clientX; startY = e.clientY; moved = false;
+      try { el.setPointerCapture(e.pointerId); } catch (_) {}
+    };
+    const onPointerMove = (e) => {
+      if (!active || source !== "pointer" || e.pointerId !== activeId) return;
+      if (Math.abs(e.clientX - startX) > 8 || Math.abs(e.clientY - startY) > 8) {
         moved = true;
         if (e.cancelable) e.preventDefault();
       }
     };
-
-    const finish = (e) => {
-      if (!active || e.pointerId !== activeId) return;
-      const wasMoved = moved;
+    const onPointerUp = (e) => {
+      if (!active || source !== "pointer" || e.pointerId !== activeId) return;
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
-      active = false;
-      activeId = null;
-      moved = false;
+      const wasMoved = moved;
+      active = false; source = null; activeId = null; moved = false;
       try { el.releasePointerCapture(e.pointerId); } catch (_) {}
-
-      if (!wasMoved) return; // it was a tap — let the click handler run
-      const absDx = Math.abs(dx);
-      const absDy = Math.abs(dy);
-      if (Math.max(absDx, absDy) < 30) return;
-      if (absDx > absDy) {
-        advance(dx < 0 ? "next" : "prev");
-      } else {
-        advance(dy < 0 ? "next" : "prev");
-      }
+      if (wasMoved) commit(dx, dy);
     };
 
-    el.addEventListener("pointerdown", onDown);
-    el.addEventListener("pointermove", onMove);
-    el.addEventListener("pointerup", finish);
-    el.addEventListener("pointercancel", finish);
+    // ---- Touch Events fallback ----
+    const onTouchStart = (e) => {
+      if (active) return;
+      if (e.touches.length !== 1) return;
+      active = true; source = "touch";
+      const t = e.touches[0];
+      startX = t.clientX; startY = t.clientY; moved = false;
+    };
+    const onTouchMove = (e) => {
+      if (!active || source !== "touch") return;
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      if (Math.abs(t.clientX - startX) > 8 || Math.abs(t.clientY - startY) > 8) {
+        moved = true;
+        if (e.cancelable) e.preventDefault();
+      }
+    };
+    const onTouchEnd = (e) => {
+      if (!active || source !== "touch") return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      const wasMoved = moved;
+      active = false; source = null; moved = false;
+      if (wasMoved) commit(dx, dy);
+    };
+    const onTouchCancel = () => {
+      if (source === "touch") { active = false; source = null; moved = false; }
+    };
+
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("pointermove", onPointerMove);
+    el.addEventListener("pointerup", onPointerUp);
+    el.addEventListener("pointercancel", onPointerUp);
+    el.addEventListener("touchstart", onTouchStart, { passive: false });
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    el.addEventListener("touchend", onTouchEnd, { passive: false });
+    el.addEventListener("touchcancel", onTouchCancel);
 
     return () => {
-      el.removeEventListener("pointerdown", onDown);
-      el.removeEventListener("pointermove", onMove);
-      el.removeEventListener("pointerup", finish);
-      el.removeEventListener("pointercancel", finish);
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("pointermove", onPointerMove);
+      el.removeEventListener("pointerup", onPointerUp);
+      el.removeEventListener("pointercancel", onPointerUp);
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("touchend", onTouchEnd);
+      el.removeEventListener("touchcancel", onTouchCancel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1426,6 +1451,28 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
 
   // 图片原始尺寸（判断横/竖图）。null 表示未加载
   const [imgDims, setImgDims] = useState(null);
+
+  // Visible viewport height in pixels, tracked via window.visualViewport so
+  // the lightbox always exactly matches the *visible* area on mobile
+  // browsers — bypassing any CSS `dvh` interpretation quirks in iOS WebKit.
+  const [vpHeight, setVpHeight] = useState(() =>
+    typeof window !== "undefined"
+      ? (window.visualViewport?.height || window.innerHeight)
+      : 800
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const update = () => {
+      setVpHeight(window.visualViewport?.height || window.innerHeight);
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.visualViewport?.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.visualViewport?.removeEventListener("resize", update);
+    };
+  }, []);
 
   // 手势状态（用 ref 不触发重渲染）
   const gestureRef = useRef({
@@ -1606,14 +1653,12 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
         top: 0,
         left: 0,
         right: 0,
-        bottom: 0,
         width: '100vw',
-        // Use dynamic viewport height (100dvh) instead of 100vh so the
-        // lightbox actually fits the *visible* part of a mobile browser
-        // viewport (excluding the address bar / nav strip). With 100vh
-        // the container extends behind the browser chrome and the
-        // bottom-positioned caption + index get rendered off-screen.
-        height: '100dvh',
+        // Use the JS-measured visible viewport height (window.visualViewport)
+        // so the container always fits the visible area on mobile, with
+        // address bar / chrome accounted for. We tried CSS `dvh` first but
+        // saw it not always honor visible viewport in iOS Chrome.
+        height: vpHeight + 'px',
         backgroundColor: bgColor,
         transition: 'background-color 0.4s ease',
         touchAction: 'none', // 禁止原生触摸滚动，不影响长按菜单
@@ -1645,13 +1690,12 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
       <div className="hidden md:block absolute top-24 bottom-24 left-0 z-10 cursor-pointer" style={{ width: '4vw' }} onClick={(e) => { e.stopPropagation(); changeImage("prev"); }} />
       <div className="hidden md:block absolute top-24 bottom-24 right-0 z-10 cursor-pointer" style={{ width: '4vw' }} onClick={(e) => { e.stopPropagation(); changeImage("next"); }} />
 
-      {/* 图片舞台 */}
+      {/* 图片舞台 — 85% of the measured visible viewport height. */}
       <div
         className="relative z-0 flex items-center justify-center pointer-events-none"
         style={{
           width: '100%',
-          // 85dvh (not 85vh) — see note on the outer container above.
-          height: '85dvh',
+          height: Math.round(vpHeight * 0.85) + 'px',
           overflow: 'hidden',
           opacity: isLoaded ? 1 : 0,
           transition: 'opacity 0.25s ease',
@@ -1707,14 +1751,15 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
       )}
 
       {/* 底部信息栏 —
-          bottom uses `max(2rem, safe-area-inset-bottom + 1rem)` so the caption
-          and index always clear the iPhone home-indicator pill and stay above
-          mobile browser bottom toolbars. */}
+          Positioned with explicit pixel `bottom` derived from the measured
+          visible viewport, so it cannot land off-screen on mobile no matter
+          how the browser chrome behaves.
+          z-50 to sit above any photo content. */}
       <div
-        className="absolute left-8 right-8 z-30 pointer-events-none flex justify-between items-end"
-        style={{ bottom: 'max(2rem, calc(env(safe-area-inset-bottom, 0px) + 1rem))' }}
+        className="absolute left-6 right-6 md:left-8 md:right-8 z-50 pointer-events-none flex justify-between items-end"
+        style={{ bottom: 'max(24px, env(safe-area-inset-bottom, 0px))' }}
       >
-        <div style={{ color: textColor }} className="font-serif font-thin text-xs tracking-widest">
+        <div style={{ color: textColor }} className="font-serif font-thin text-[11px] md:text-xs tracking-widest">
           {currentImage.year} — {displayTitle}
         </div>
 
@@ -1737,7 +1782,7 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
               <ChevronRight size={20} strokeWidth={1} />
             </button>
           </div>
-          <div style={{ color: textColor }} className="font-mono text-xs tracking-widest">
+          <div style={{ color: textColor }} className="font-mono text-[11px] md:text-xs tracking-widest">
             {currentIndex + 1} / {images.length}
           </div>
         </div>
