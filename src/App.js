@@ -440,8 +440,14 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
         </button>
       </div>
 
-      {/* Reading area — narrow column for comfortable line-length */}
-      <div className="max-w-[720px] mx-auto px-6 md:px-0 pt-8 md:pt-16 pb-32">
+      {/* Reading area —
+          - Text column stays at a comfortable ~720px so line-length stays in
+            the 60–80 character sweet spot for reading.
+          - Images break out wider than the text column on bigger screens
+            (magazine-style), via negative horizontal margins. On a 1920px
+            screen they end up ~1100–1200px wide, which gives the photos
+            room to breathe without forcing the eye to scan oversized text. */}
+      <div className="max-w-[720px] lg:max-w-[760px] mx-auto px-6 md:px-0 pt-8 md:pt-16 pb-32">
         {(!blocks || blocks.length === 0) && (
           <p className="text-neutral-600 text-center py-20 text-sm tracking-widest uppercase">
             No content
@@ -469,7 +475,7 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
           }
           if (block.type === "image") {
             return (
-              <figure key={idx} className="my-12 md:my-16 -mx-6 md:mx-0">
+              <figure key={idx} className="my-12 md:my-16 -mx-6 md:-mx-16 lg:-mx-32 xl:-mx-48">
                 <img
                   src={block.url}
                   alt={block.caption || ""}
@@ -477,7 +483,7 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
                   className="w-full h-auto block"
                 />
                 {block.caption && (
-                  <figcaption className="font-sans text-neutral-500 text-xs md:text-sm leading-relaxed mt-3 px-6 md:px-0 italic">
+                  <figcaption className="font-sans text-neutral-500 text-xs md:text-sm leading-relaxed mt-3 px-6 md:px-16 lg:px-32 xl:px-48 italic">
                     {block.caption}
                   </figcaption>
                 )}
@@ -1090,6 +1096,14 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [animKey, setAnimKey] = useState(0);
 
+  // Auto-rotate timer ref so a manual swipe can reset it (otherwise a swipe
+  // 4 s in would still trigger an automatic advance 1 s later).
+  const autoRotateRef = useRef(null);
+
+  // Touch gesture state — kept in a ref so updates don't trigger re-renders
+  // mid-swipe and don't risk a stale closure when touchEnd fires.
+  const touchRef = useRef({ startX: 0, startY: 0, startTime: 0, moved: false });
+
   useEffect(() => {
     if (slides.length > 1) {
       const nextIndex = (currentIndex + 1) % slides.length;
@@ -1098,20 +1112,38 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
     }
   }, [currentIndex, slides]);
 
-  useEffect(() => {
-    if (!slides || slides.length === 0) return;
-    const interval = setInterval(() => {
+  // Auto-rotate — separated so manual gestures can call resetAutoRotate()
+  // to restart the 5 s timer from "now".
+  const startAutoRotate = () => {
+    if (autoRotateRef.current) clearInterval(autoRotateRef.current);
+    if (!slides || slides.length <= 1) return;
+    autoRotateRef.current = setInterval(() => {
       setCurrentIndex((prev) => {
         setAnimKey(k => k + 1);
         return (prev + 1) % slides.length;
       });
     }, 5000);
-    return () => clearInterval(interval);
+  };
+
+  useEffect(() => {
+    startAutoRotate();
+    return () => { if (autoRotateRef.current) clearInterval(autoRotateRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slides]);
 
   useEffect(() => { onIndexChange && onIndexChange(currentIndex); }, [currentIndex, onIndexChange]);
 
   if (!slides || slides.length === 0) return null;
+
+  // Advance the carousel manually (from a swipe).
+  const advance = (direction) => {
+    setCurrentIndex((prev) => {
+      setAnimKey(k => k + 1);
+      if (direction === "next") return (prev + 1) % slides.length;
+      return (prev - 1 + slides.length) % slides.length;
+    });
+    startAutoRotate(); // reset the 5 s timer so the next auto-tick is 5 s from now
+  };
 
   const handleSlideClick = (slide) => {
     if (slide.link) {
@@ -1120,8 +1152,62 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
     }
   };
 
+  // --- Touch gesture handlers ---
+  // The hero element below sets `touch-action: none` which tells the browser
+  // not to scroll/zoom on touch, so the rubber-band overscroll bug stops.
+  // We listen to touchstart/move/end ourselves to recognize swipes.
+  const onTouchStart = (e) => {
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0];
+    touchRef.current = {
+      startX: t.clientX,
+      startY: t.clientY,
+      startTime: Date.now(),
+      moved: false,
+    };
+  };
+
+  const onTouchMove = (e) => {
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0];
+    if (
+      Math.abs(t.clientX - touchRef.current.startX) > 10 ||
+      Math.abs(t.clientY - touchRef.current.startY) > 10
+    ) {
+      touchRef.current.moved = true;
+    }
+  };
+
+  const onTouchEnd = (e) => {
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touchRef.current.startX;
+    const dy = t.clientY - touchRef.current.startY;
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+
+    // Tap (no real movement) → let the underlying click handler run, do nothing.
+    if (!touchRef.current.moved) return;
+
+    // Not enough movement to count as a swipe — ignore (tiny drift).
+    if (Math.max(absDx, absDy) < 40) return;
+
+    if (absDx > absDy) {
+      // Horizontal: left = next, right = previous.
+      advance(dx < 0 ? "next" : "prev");
+    } else {
+      // Vertical:   up   = next, down  = previous.
+      advance(dy < 0 ? "next" : "prev");
+    }
+  };
+
   return (
-    <div className="absolute inset-0 w-full h-full bg-black overflow-hidden z-0">
+    <div
+      className="absolute inset-0 w-full h-full bg-black overflow-hidden z-0"
+      style={{ touchAction: "none", overscrollBehavior: "none" }}
+      onTouchStart={onTouchStart}
+      onTouchMove={onTouchMove}
+      onTouchEnd={onTouchEnd}
+    >
       {slides.map((slide, index) => {
         const isActive = index === currentIndex;
         return (
@@ -2495,6 +2581,31 @@ const MainView = ({ photos, settings, onLoginClick, isOffline }) => {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  // When the home view is active, lock body scroll + disable overscroll
+  // bouncing. Without this, swiping down on a mobile browser pulls the
+  // hero up and reveals the dark page background beneath. With it, the
+  // hero is rock-solid and the swipe handler in HeroSlideshow is the
+  // only thing that reacts to finger movements.
+  useEffect(() => {
+    const onHome = view === "home" && !showAbout;
+    if (!onHome) return;
+    const body = document.body;
+    const html = document.documentElement;
+    const prev = {
+      bodyOverflow: body.style.overflow,
+      bodyOverscroll: body.style.overscrollBehavior,
+      htmlOverscroll: html.style.overscrollBehavior,
+    };
+    body.style.overflow = "hidden";
+    body.style.overscrollBehavior = "none";
+    html.style.overscrollBehavior = "none";
+    return () => {
+      body.style.overflow = prev.bodyOverflow;
+      body.style.overscrollBehavior = prev.bodyOverscroll;
+      html.style.overscrollBehavior = prev.htmlOverscroll;
+    };
+  }, [view, showAbout]);
 
   useEffect(() => {
     if (visiblePhotos.length === 0) return;
