@@ -529,7 +529,7 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
                 {paragraphs.map((para, pIdx) => (
                   <p
                     key={pIdx}
-                    className="font-sans text-neutral-300 text-[14px] md:text-[12px] leading-[1.85] md:leading-[1.8] mb-5 md:mb-4 last:mb-0 whitespace-pre-wrap"
+                    className="font-sans text-neutral-300 text-[12px] md:text-[11px] leading-[1.85] md:leading-[1.75] mb-5 md:mb-4 last:mb-0 whitespace-pre-wrap"
                     style={{ fontWeight: 300 }}
                   >
                     {para}
@@ -650,6 +650,29 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
     const [isPrivate, setIsPrivate] = useState(false);
     const [privateStoryId, setPrivateStoryId] = useState(null);
     const [password, setPassword] = useState('');
+
+    // Track the *visible* viewport height (window.visualViewport.height) so
+    // the modal can size itself to actually fit the visible area on mobile.
+    // Without this, max-h-[95vh] uses LAYOUT viewport, which on iOS includes
+    // the address bar / nav strip and pushes the Save button off-screen.
+    const [vpHeight, setVpHeight] = useState(() =>
+      typeof window !== "undefined"
+        ? (window.visualViewport?.height || window.innerHeight)
+        : 800
+    );
+    useEffect(() => {
+      if (typeof window === "undefined") return;
+      const update = () => {
+        setVpHeight(window.visualViewport?.height || window.innerHeight);
+      };
+      update();
+      window.addEventListener("resize", update);
+      window.visualViewport?.addEventListener("resize", update);
+      return () => {
+        window.removeEventListener("resize", update);
+        window.visualViewport?.removeEventListener("resize", update);
+      };
+    }, []);
 
     useEffect(() => {
       if (initialData) {
@@ -810,7 +833,10 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
 
     return (
       <div className="fixed inset-0 z-[200] bg-black/80 backdrop-blur-sm flex items-center justify-center p-2 md:p-4">
-         <div className="bg-neutral-900 border border-neutral-800 rounded-xl w-full max-w-3xl shadow-2xl animate-fade-in-up max-h-[95vh] flex flex-col">
+         <div
+           className="bg-neutral-900 border border-neutral-800 rounded-xl w-full max-w-3xl shadow-2xl animate-fade-in-up flex flex-col"
+           style={{ maxHeight: Math.max(360, vpHeight - 24) + 'px' }}
+         >
             {/* Header */}
             <div className="px-5 md:px-6 pt-5 md:pt-6 pb-3 border-b border-neutral-800 flex items-center justify-between flex-shrink-0">
               <h3 className="text-white text-base md:text-lg font-bold">Edit Project Info</h3>
@@ -975,7 +1001,7 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
                               onChange={e => updateBlock(idx, { content: e.target.value })}
                               placeholder="Write your paragraph here. Leave a blank line to start a new paragraph."
                               rows={5}
-                              className="w-full bg-black border border-neutral-700 rounded p-2 text-white text-sm leading-relaxed resize-y"
+                              className="w-full bg-black border border-neutral-700 rounded p-2 text-white text-xs leading-relaxed resize-y"
                             />
                           )}
 
@@ -986,7 +1012,7 @@ const ProjectEditModal = ({ isOpen, onClose, initialData, onSave, storagePathPre
                                   <img
                                     src={block.url}
                                     alt=""
-                                    className="w-full max-h-64 object-contain bg-neutral-950 rounded"
+                                    className="w-full max-h-44 object-contain bg-neutral-950 rounded"
                                   />
                                   <label className="absolute top-2 right-2 px-2 py-1 bg-black/70 hover:bg-black text-white text-[10px] uppercase tracking-wider rounded cursor-pointer">
                                     Replace
