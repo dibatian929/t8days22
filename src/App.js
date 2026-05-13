@@ -397,6 +397,48 @@ const LoginModal = ({ isOpen, onClose, onLogin }) => {
 // --- Project Story Reader Modal (front-end) ---
 // Immersive full-screen reading view: scrollable page with mixed text/image blocks.
 // Sans-serif body for legibility; serif title to echo the rest of the site.
+// Story image renderer with enforced aspect ratio.
+// Once the underlying image loads we know its natural orientation:
+//   - landscape (w ≥ h) → render container at 4:3
+//   - portrait  (w  < h) → render container at 3:4
+// We then `object-cover` the image into that fixed-ratio box. The result
+// is visually consistent across photos of different ratios (square, 2:3
+// classic film, 16:9 wide, etc.) which the original "natural ratio"
+// rendering made look uneven on the reading page.
+const StoryImageBlock = ({ block }) => {
+  const [orient, setOrient] = useState(null); // 'landscape' | 'portrait' | null
+
+  const handleLoad = (e) => {
+    const { naturalWidth: w, naturalHeight: h } = e.target;
+    if (!w || !h) return;
+    setOrient(w >= h ? "landscape" : "portrait");
+  };
+
+  // Pre-load with assumed 4:3 to minimize layout shift (most photos are
+  // landscape). Once we know it's actually portrait we switch to 3:4.
+  const ratioClass =
+    orient === "portrait" ? "aspect-[3/4]" : "aspect-[4/3]";
+
+  return (
+    <figure className="my-12 md:my-16 -mx-6 md:-mx-16 lg:-mx-32 xl:-mx-48">
+      <div className={`w-full ${ratioClass} bg-neutral-900 overflow-hidden`}>
+        <img
+          src={block.url}
+          alt={block.caption || ""}
+          loading="lazy"
+          onLoad={handleLoad}
+          className="w-full h-full object-cover block"
+        />
+      </div>
+      {block.caption && (
+        <figcaption className="font-sans text-neutral-500 text-[11px] md:text-xs leading-relaxed mt-3 px-6 md:px-16 lg:px-32 xl:px-48 italic">
+          {block.caption}
+        </figcaption>
+      )}
+    </figure>
+  );
+};
+
 const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
   useEffect(() => {
     if (!isOpen) return;
@@ -441,13 +483,14 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
       </div>
 
       {/* Reading area —
-          - Text column stays at a comfortable ~720px so line-length stays in
-            the 60–80 character sweet spot for reading.
+          - Text column wider on larger screens (lg→820, xl→880) for less
+            cramped feeling without exceeding the 60–80 character sweet spot.
+          - Text sized down ~2 steps from the previous spec (now ~14/15px on
+            mobile, ~15/16px on desktop) for a more refined feel that matches
+            the rest of the site's typography.
           - Images break out wider than the text column on bigger screens
-            (magazine-style), via negative horizontal margins. On a 1920px
-            screen they end up ~1100–1200px wide, which gives the photos
-            room to breathe without forcing the eye to scan oversized text. */}
-      <div className="max-w-[720px] lg:max-w-[760px] mx-auto px-6 md:px-0 pt-8 md:pt-16 pb-32">
+            (magazine-style), via negative horizontal margins. */}
+      <div className="max-w-[720px] md:max-w-[760px] lg:max-w-[820px] xl:max-w-[880px] mx-auto px-6 md:px-0 pt-8 md:pt-16 pb-32">
         {(!blocks || blocks.length === 0) && (
           <p className="text-neutral-600 text-center py-20 text-sm tracking-widest uppercase">
             No content
@@ -460,11 +503,11 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
             // text blocks naturally with a single textarea.
             const paragraphs = (block.content || "").split(/\n\s*\n/).filter(Boolean);
             return (
-              <div key={idx} className="mb-10 md:mb-12">
+              <div key={idx} className="mb-8 md:mb-10">
                 {paragraphs.map((para, pIdx) => (
                   <p
                     key={pIdx}
-                    className="font-sans text-neutral-300 text-base md:text-lg leading-[1.9] mb-6 last:mb-0 whitespace-pre-wrap"
+                    className="font-sans text-neutral-300 text-[14px] md:text-[15px] leading-[1.85] mb-5 last:mb-0 whitespace-pre-wrap"
                     style={{ fontWeight: 300 }}
                   >
                     {para}
@@ -474,21 +517,7 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
             );
           }
           if (block.type === "image") {
-            return (
-              <figure key={idx} className="my-12 md:my-16 -mx-6 md:-mx-16 lg:-mx-32 xl:-mx-48">
-                <img
-                  src={block.url}
-                  alt={block.caption || ""}
-                  loading="lazy"
-                  className="w-full h-auto block"
-                />
-                {block.caption && (
-                  <figcaption className="font-sans text-neutral-500 text-xs md:text-sm leading-relaxed mt-3 px-6 md:px-16 lg:px-32 xl:px-48 italic">
-                    {block.caption}
-                  </figcaption>
-                )}
-              </figure>
-            );
+            return <StoryImageBlock key={idx} block={block} />;
           }
           return null;
         })}
@@ -1100,9 +1129,14 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
   // 4 s in would still trigger an automatic advance 1 s later).
   const autoRotateRef = useRef(null);
 
-  // Touch gesture state — kept in a ref so updates don't trigger re-renders
-  // mid-swipe and don't risk a stale closure when touchEnd fires.
-  const touchRef = useRef({ startX: 0, startY: 0, startTime: 0, moved: false });
+  // Ref to the root element. We attach touch listeners via native
+  // addEventListener (not React's onTouchMove) because React's synthetic
+  // touchmove is registered as passive on the root, which means our handler
+  // can't call preventDefault and on some mobile browsers the events get
+  // swallowed mid-gesture. Native listeners with { passive: false } work.
+  const rootRef = useRef(null);
+  const slidesRef = useRef(slides);
+  useEffect(() => { slidesRef.current = slides; }, [slides]);
 
   useEffect(() => {
     if (slides.length > 1) {
@@ -1112,15 +1146,16 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
     }
   }, [currentIndex, slides]);
 
-  // Auto-rotate — separated so manual gestures can call resetAutoRotate()
+  // Auto-rotate — separated so manual gestures can call startAutoRotate()
   // to restart the 5 s timer from "now".
   const startAutoRotate = () => {
     if (autoRotateRef.current) clearInterval(autoRotateRef.current);
-    if (!slides || slides.length <= 1) return;
+    const list = slidesRef.current;
+    if (!list || list.length <= 1) return;
     autoRotateRef.current = setInterval(() => {
       setCurrentIndex((prev) => {
         setAnimKey(k => k + 1);
-        return (prev + 1) % slides.length;
+        return (prev + 1) % list.length;
       });
     }, 5000);
   };
@@ -1133,17 +1168,74 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
 
   useEffect(() => { onIndexChange && onIndexChange(currentIndex); }, [currentIndex, onIndexChange]);
 
-  if (!slides || slides.length === 0) return null;
+  // Native touch gesture listeners.
+  // React's onTouchMove is internally passive in modern React, so
+  // `e.preventDefault()` is a no-op there and the browser sometimes still
+  // wins the gesture. We bypass that by attaching listeners directly.
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
 
-  // Advance the carousel manually (from a swipe).
-  const advance = (direction) => {
-    setCurrentIndex((prev) => {
-      setAnimKey(k => k + 1);
-      if (direction === "next") return (prev + 1) % slides.length;
-      return (prev - 1 + slides.length) % slides.length;
-    });
-    startAutoRotate(); // reset the 5 s timer so the next auto-tick is 5 s from now
-  };
+    let startX = 0;
+    let startY = 0;
+    let moved = false;
+
+    const advance = (direction) => {
+      const list = slidesRef.current;
+      if (!list || list.length <= 1) return;
+      setCurrentIndex((prev) => {
+        setAnimKey(k => k + 1);
+        if (direction === "next") return (prev + 1) % list.length;
+        return (prev - 1 + list.length) % list.length;
+      });
+      startAutoRotate();
+    };
+
+    const handleStart = (e) => {
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      startX = t.clientX;
+      startY = t.clientY;
+      moved = false;
+    };
+    const handleMove = (e) => {
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      if (Math.abs(t.clientX - startX) > 8 || Math.abs(t.clientY - startY) > 8) {
+        moved = true;
+        // Block native pull-to-refresh / overscroll bouncing on actual drags.
+        e.preventDefault();
+      }
+    };
+    const handleEnd = (e) => {
+      if (!moved) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      const absDx = Math.abs(dx);
+      const absDy = Math.abs(dy);
+      if (Math.max(absDx, absDy) < 30) return; // too small a swipe
+
+      if (absDx > absDy) {
+        advance(dx < 0 ? "next" : "prev");
+      } else {
+        advance(dy < 0 ? "next" : "prev");
+      }
+    };
+
+    el.addEventListener("touchstart", handleStart, { passive: false });
+    el.addEventListener("touchmove", handleMove, { passive: false });
+    el.addEventListener("touchend", handleEnd, { passive: false });
+
+    return () => {
+      el.removeEventListener("touchstart", handleStart);
+      el.removeEventListener("touchmove", handleMove);
+      el.removeEventListener("touchend", handleEnd);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!slides || slides.length === 0) return null;
 
   const handleSlideClick = (slide) => {
     if (slide.link) {
@@ -1152,61 +1244,11 @@ const HeroSlideshow = ({ slides, onIndexChange, onLinkClick }) => {
     }
   };
 
-  // --- Touch gesture handlers ---
-  // The hero element below sets `touch-action: none` which tells the browser
-  // not to scroll/zoom on touch, so the rubber-band overscroll bug stops.
-  // We listen to touchstart/move/end ourselves to recognize swipes.
-  const onTouchStart = (e) => {
-    if (e.touches.length !== 1) return;
-    const t = e.touches[0];
-    touchRef.current = {
-      startX: t.clientX,
-      startY: t.clientY,
-      startTime: Date.now(),
-      moved: false,
-    };
-  };
-
-  const onTouchMove = (e) => {
-    if (e.touches.length !== 1) return;
-    const t = e.touches[0];
-    if (
-      Math.abs(t.clientX - touchRef.current.startX) > 10 ||
-      Math.abs(t.clientY - touchRef.current.startY) > 10
-    ) {
-      touchRef.current.moved = true;
-    }
-  };
-
-  const onTouchEnd = (e) => {
-    const t = e.changedTouches[0];
-    const dx = t.clientX - touchRef.current.startX;
-    const dy = t.clientY - touchRef.current.startY;
-    const absDx = Math.abs(dx);
-    const absDy = Math.abs(dy);
-
-    // Tap (no real movement) → let the underlying click handler run, do nothing.
-    if (!touchRef.current.moved) return;
-
-    // Not enough movement to count as a swipe — ignore (tiny drift).
-    if (Math.max(absDx, absDy) < 40) return;
-
-    if (absDx > absDy) {
-      // Horizontal: left = next, right = previous.
-      advance(dx < 0 ? "next" : "prev");
-    } else {
-      // Vertical:   up   = next, down  = previous.
-      advance(dy < 0 ? "next" : "prev");
-    }
-  };
-
   return (
     <div
+      ref={rootRef}
       className="absolute inset-0 w-full h-full bg-black overflow-hidden z-0"
       style={{ touchAction: "none", overscrollBehavior: "none" }}
-      onTouchStart={onTouchStart}
-      onTouchMove={onTouchMove}
-      onTouchEnd={onTouchEnd}
     >
       {slides.map((slide, index) => {
         const isActive = index === currentIndex;
@@ -1513,7 +1555,12 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
         right: 0,
         bottom: 0,
         width: '100vw',
-        height: '100vh',
+        // Use dynamic viewport height (100dvh) instead of 100vh so the
+        // lightbox actually fits the *visible* part of a mobile browser
+        // viewport (excluding the address bar / nav strip). With 100vh
+        // the container extends behind the browser chrome and the
+        // bottom-positioned caption + index get rendered off-screen.
+        height: '100dvh',
         backgroundColor: bgColor,
         transition: 'background-color 0.4s ease',
         touchAction: 'none', // 禁止原生触摸滚动，不影响长按菜单
@@ -1550,7 +1597,8 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
         className="relative z-0 flex items-center justify-center pointer-events-none"
         style={{
           width: '100%',
-          height: '85vh',
+          // 85dvh (not 85vh) — see note on the outer container above.
+          height: '85dvh',
           overflow: 'hidden',
           opacity: isLoaded ? 1 : 0,
           transition: 'opacity 0.25s ease',
