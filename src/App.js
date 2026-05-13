@@ -401,27 +401,39 @@ const LoginModal = ({ isOpen, onClose, onLogin }) => {
 // Once the underlying image loads we know its natural orientation:
 //   - landscape (w ≥ h) → render container at 4:3
 //   - portrait  (w  < h) → render container at 3:4
-// We then `object-cover` the image into that fixed-ratio box. The result
-// is visually consistent across photos of different ratios (square, 2:3
-// classic film, 16:9 wide, etc.) which the original "natural ratio"
-// rendering made look uneven on the reading page.
+// The image is then `object-cover`'d into that fixed-ratio box. The result
+// is visually consistent across photos of different native ratios (1:1,
+// 16:9, 2:3 film, panoramic, etc.) which would otherwise make the reading
+// page look uneven.
+//
+// We use an inline `aspectRatio` CSS property rather than a Tailwind class
+// because:
+//   (1) the site is loaded via the Tailwind CDN whose JIT can be finicky
+//       about arbitrary values like `aspect-[3/4]`, and
+//   (2) cached browser CSS doesn't always pick up the new rule after a deploy.
+// Native CSS `aspect-ratio` is in every evergreen browser since 2021.
 const StoryImageBlock = ({ block }) => {
   const [orient, setOrient] = useState(null); // 'landscape' | 'portrait' | null
 
   const handleLoad = (e) => {
-    const { naturalWidth: w, naturalHeight: h } = e.target;
+    const t = e.currentTarget;
+    const w = t.naturalWidth;
+    const h = t.naturalHeight;
     if (!w || !h) return;
     setOrient(w >= h ? "landscape" : "portrait");
   };
 
-  // Pre-load with assumed 4:3 to minimize layout shift (most photos are
-  // landscape). Once we know it's actually portrait we switch to 3:4.
-  const ratioClass =
-    orient === "portrait" ? "aspect-[3/4]" : "aspect-[4/3]";
+  // Default to 4:3 before the image has loaded — most photos are landscape,
+  // so this minimizes layout shift. When `onLoad` resolves a portrait image
+  // we switch to 3:4.
+  const aspectRatio = orient === "portrait" ? "3 / 4" : "4 / 3";
 
   return (
     <figure className="my-12 md:my-16 -mx-6 md:-mx-16 lg:-mx-32 xl:-mx-48">
-      <div className={`w-full ${ratioClass} bg-neutral-900 overflow-hidden`}>
+      <div
+        className="w-full bg-neutral-900 overflow-hidden"
+        style={{ aspectRatio }}
+      >
         <img
           src={block.url}
           alt={block.caption || ""}
@@ -483,14 +495,15 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
       </div>
 
       {/* Reading area —
-          - Text column wider on larger screens (lg→820, xl→880) for less
-            cramped feeling without exceeding the 60–80 character sweet spot.
-          - Text sized down ~2 steps from the previous spec (now ~14/15px on
-            mobile, ~15/16px on desktop) for a more refined feel that matches
-            the rest of the site's typography.
-          - Images break out wider than the text column on bigger screens
-            (magazine-style), via negative horizontal margins. */}
-      <div className="max-w-[720px] md:max-w-[760px] lg:max-w-[820px] xl:max-w-[880px] mx-auto px-6 md:px-0 pt-8 md:pt-16 pb-32">
+          - Text column +30% wider on desktop than the previous iteration
+            (md→900, lg→1040, xl→1140). Mobile stays at 720, since on a
+            phone the viewport itself is the real width constraint.
+          - Body text at 14px on mobile, **12px on desktop** per editorial
+            preference — desktop reading distance is greater, so 12px on a
+            wider column still parses easily and feels more refined.
+          - Images break out wider than the text column via negative margins,
+            so a wider text column also means proportionally wider photos. */}
+      <div className="max-w-[720px] md:max-w-[900px] lg:max-w-[1040px] xl:max-w-[1140px] mx-auto px-6 md:px-0 pt-8 md:pt-16 pb-32">
         {(!blocks || blocks.length === 0) && (
           <p className="text-neutral-600 text-center py-20 text-sm tracking-widest uppercase">
             No content
@@ -507,7 +520,7 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
                 {paragraphs.map((para, pIdx) => (
                   <p
                     key={pIdx}
-                    className="font-sans text-neutral-300 text-[14px] md:text-[15px] leading-[1.85] mb-5 last:mb-0 whitespace-pre-wrap"
+                    className="font-sans text-neutral-300 text-[14px] md:text-[12px] leading-[1.85] md:leading-[1.8] mb-5 md:mb-4 last:mb-0 whitespace-pre-wrap"
                     style={{ fontWeight: 300 }}
                   >
                     {para}
@@ -1653,8 +1666,14 @@ const ImmersiveLightbox = ({ initialIndex, images, onClose, onIndexChange, lang 
         />
       )}
 
-      {/* 底部信息栏 */}
-      <div className="absolute bottom-8 left-8 right-8 z-30 pointer-events-none flex justify-between items-end">
+      {/* 底部信息栏 —
+          bottom uses `max(2rem, safe-area-inset-bottom + 1rem)` so the caption
+          and index always clear the iPhone home-indicator pill and stay above
+          mobile browser bottom toolbars. */}
+      <div
+        className="absolute left-8 right-8 z-30 pointer-events-none flex justify-between items-end"
+        style={{ bottom: 'max(2rem, calc(env(safe-area-inset-bottom, 0px) + 1rem))' }}
+      >
         <div style={{ color: textColor }} className="font-serif font-thin text-xs tracking-widest">
           {currentImage.year} — {displayTitle}
         </div>
