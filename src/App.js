@@ -568,7 +568,7 @@ const ProjectStoryModal = ({ isOpen, onClose, projectTitle, blocks }) => {
                 {paragraphs.map((para, pIdx) => (
                   <p
                     key={pIdx}
-                    className="font-sans text-neutral-300 text-[12px] md:text-[11px] leading-[1.85] md:leading-[1.75] mb-5 md:mb-4 last:mb-0 whitespace-pre-wrap"
+                    className="font-sans text-neutral-300 text-[11px] md:text-[10px] leading-[1.85] md:leading-[1.7] mb-5 md:mb-4 last:mb-0 whitespace-pre-wrap"
                     style={{ fontWeight: 300 }}
                   >
                     {para}
